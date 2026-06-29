@@ -1,6 +1,7 @@
 # @package _global_
 
-# Direct jump from 96x96 to 224x224 at switch_epoch
+# Direct jump from 96x96 to 224x224 at switch_epoch.
+# Batch size and learning rate scale together (reference: batch 512, lr 1e-3 at 224x224).
 # uv run src/train.py experiment=progressive_res_direct
 
 defaults:
@@ -20,7 +21,12 @@ callbacks:
     _target_: src.callbacks.progressive_resolution.ProgressiveResolutionCallback
     mode: direct
     full_crop_size: 224
-    switch_epoch: 5
+    switch_epoch: 15
+    match_tokens: true
+    reference_batch_size: 512
+
+  model_checkpoint:
+    every_n_epochs: 1
 
 experiment_name: "progressive_res_direct_96_to_224"
 tags: ["ablate", "train"]

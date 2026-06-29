@@ -4,3 +4,5 @@ progressive_resolution:
   full_crop_size: 224
   step_size: 16
   epochs_per_stage: 1
+  match_tokens: true
+  reference_batch_size: 512

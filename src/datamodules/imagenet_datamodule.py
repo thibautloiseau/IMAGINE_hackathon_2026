@@ -343,6 +343,10 @@ class ImageNetDataModule(LightningDataModule):
         if self.data_train is not None:
             self.data_train.transform = self.train_transforms
 
+    def set_batch_size(self, batch_size: int) -> None:
+        """Update per-device training batch size."""
+        self.batch_size_per_device = batch_size
+
     @property
     def num_classes(self) -> int:
         """Get the number of classes.
