@@ -1,6 +1,8 @@
 # @package _global_
 
 # Linear resolution schedule: 96 -> 112 -> 128 -> ... -> 224 (+16 per stage)
+# Batch size scales so patch tokens per step match 512 x (224/16)^2 at full resolution.
+# Learning rate scales linearly with batch size (reference: 1e-3 at batch 512).
 # uv run src/train.py experiment=progressive_res_linear
 
 defaults:
@@ -22,6 +24,8 @@ callbacks:
     full_crop_size: 224
     step_size: 16
     epochs_per_stage: 1
+    match_tokens: true
+    reference_batch_size: 512
 
 experiment_name: "progressive_res_linear_96_to_224"
 tags: ["ablate", "train"]
