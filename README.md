@@ -44,6 +44,16 @@ wget https://image-net.org/data/ILSVRC/2012/ILSVRC2012_img_train.tar
 If the command doesn't work, download the train split manually from [here](https://image-net.org/challenges/LSVRC/2012/2012-downloads.php#images) - Training images (Task 1 & 2).
 
 Then extract the contents and locate `Data/CLS-LOC/train`. Place it under `data/`, as `data/train`. Then, `cd` into `split_train_set`, check that the paths and options in `split_val_by_spec.py` are correct, and run `python split_val_by_spec.py`.
+=======
+If the download is too slow, or if your machine is not in the lab subnetwork, you can download the dataset from HuggingFace:
+```bash
+curl -LsSf https://hf.co/cli/install.sh | bash
+cd data/
+hf download martalorau/IMAGINE_Hackathon --repo-type dataset
+tar -xf train.tar
+tar -xf val.tar
+cd ../
+```
 
 ### uv
 We are going to use the [uv package manager](https://docs.astral.sh/uv/). To install it, run:
