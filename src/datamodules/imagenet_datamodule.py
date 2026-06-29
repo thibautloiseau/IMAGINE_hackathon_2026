@@ -1,6 +1,7 @@
+import csv
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import torch
 import torchvision.transforms.v2 as T
@@ -9,6 +10,16 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.dataloader import default_collate
 from torchvision.datasets import ImageFolder
 from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
+
+
+def _relkey(path: str) -> str:
+    """Return the path-prefix-independent key ``<class>/<filename>`` for an image.
+
+    Only the last two path components are used so that keys match regardless of the
+    absolute data directory, which differs between the deduplication CSV (generated on
+    another machine) and the data location used at training time.
+    """
+    return "/".join(Path(path).parts[-2:])
 
 
 class UnlabeledImageFolder:
@@ -78,6 +89,7 @@ class ImageNetDataModule(LightningDataModule):
         train_dir: str = "train",
         val_dir: str = "val",
         test_dir: str = "test",
+        duplicates_csv: str = None,
         eval_resize_size: int = 256,
         eval_crop_size: int = 224,
         train_crop_size: int = 224,
@@ -100,6 +112,9 @@ class ImageNetDataModule(LightningDataModule):
         :param train_dir: The training data directory name. Defaults to `"train"`.
         :param val_dir: The validation data directory name. Defaults to `"val"`.
         :param test_dir: The test data directory name. Defaults to `"test"`.
+        :param duplicates_csv: Path to an imagededup `find_duplicates` CSV. When set, near-duplicate
+            images are dropped from the training set (one image per cluster is kept) so the model
+            ignores them during training. Defaults to `None` (no filtering).
         :param eval_resize_size: The size to resize the shorter side of the image for evaluation. Defaults to `256`.
         :param eval_crop_size: The size to center crop the image for evaluation. Defaults to `224`.
         :param train_crop_size: The size to randomly crop the image for training. Defaults to `224`.
@@ -228,6 +243,8 @@ class ImageNetDataModule(LightningDataModule):
                     os.path.join(self.hparams.data_path, self.hparams.train_dir),
                     transform=self.train_transforms,
                 )
+                if self.hparams.duplicates_csv:
+                    self._drop_duplicates(self.data_train)
 
             if not self.data_val:
                 self.data_val = ImageFolder(
@@ -319,6 +336,49 @@ class ImageNetDataModule(LightningDataModule):
             return None
 
         return T.RandomChoice(mixup_cutmix)
+
+    def _files_to_remove(self, csv_path: str) -> Set[str]:
+        """Compute the set of duplicate images to drop from an imagededup CSV.
+
+        Reads the `find_duplicates` CSV and applies the same greedy selection as
+        imagededup's `get_files_to_remove`: iterating rows in order, the first image seen in
+        a cluster is kept and all of its duplicates are marked for removal. Keys are
+        path-prefix independent (`<class>/<filename>`), so the CSV's absolute paths need not
+        match the data location.
+
+        :param csv_path: Path to the imagededup `find_duplicates` CSV.
+        :return: A set of `<class>/<filename>` keys to exclude from training.
+        """
+        to_remove: Set[str] = set()
+        with open(csv_path, newline="") as f:
+            for row in csv.DictReader(f):
+                key = _relkey(row["filename_path"])
+                if key in to_remove:
+                    continue
+                dup_paths = row["duplicates_paths"]
+                if not dup_paths:
+                    continue
+                to_remove.update(_relkey(p) for p in dup_paths.split("|") if p)
+        return to_remove
+
+    def _drop_duplicates(self, dataset: ImageFolder) -> None:
+        """Filter near-duplicate images out of an `ImageFolder` in place.
+
+        Rebuilds `samples`, `imgs`, and `targets` (which `ImageFolder` keeps in sync) to
+        exclude the images selected by :meth:`_files_to_remove`.
+
+        :param dataset: The training `ImageFolder` to prune.
+        """
+        to_remove = self._files_to_remove(self.hparams.duplicates_csv)
+        original = len(dataset.samples)
+        kept = [s for s in dataset.samples if _relkey(s[0]) not in to_remove]
+        dataset.samples = kept
+        dataset.imgs = kept
+        dataset.targets = [target for _, target in kept]
+        print(
+            f"Deduplication: dropped {original - len(kept)} of {original} training images "
+            f"using {self.hparams.duplicates_csv}"
+        )
 
 
 if __name__ == "__main__":

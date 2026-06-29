@@ -1,5 +1,8 @@
 # @package _global_
 
+# Same as train.yaml but drops near-duplicate training images using the pHash CSV.
+# Run with: uv run src/train.py --config-name train_phash
+
 # specify here default configuration
 # order of defaults determines the order in which configs override each other
 defaults:
@@ -46,4 +49,4 @@ module:
 # Matching is path-prefix independent (<class>/<filename>), so the data home dir can differ
 # from the CSV. Override on the CLI (e.g. datamodule.duplicates_csv=null to disable).
 datamodule:
-  duplicates_csv: ${paths.root_dir}/imagededup/duplicates_cnn.csv
+  duplicates_csv: ${paths.root_dir}/imagededup/duplicates_phash.csv

@@ -3,6 +3,7 @@ data_path: ${paths.data_dir}
 train_dir: 'train'
 val_dir: 'val'
 test_dir: 'test'
+duplicates_csv: null # Path to an imagededup CSV to drop near-duplicate training images
 batch_size: 512 # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
 num_workers: 16
 prefetch_factor: 3
