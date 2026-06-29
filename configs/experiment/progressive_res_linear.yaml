@@ -1,0 +1,27 @@
+# @package _global_
+
+# Linear resolution schedule: 96 -> 112 -> 128 -> ... -> 224 (+16 per stage)
+# uv run src/train.py experiment=progressive_res_linear
+
+defaults:
+  - override /trainer: imagenet_vit_s_16
+  - override /callbacks: default
+
+seed: 42
+
+module:
+  compile: false
+
+datamodule:
+  train_crop_size: 96
+
+callbacks:
+  progressive_resolution:
+    _target_: src.callbacks.progressive_resolution.ProgressiveResolutionCallback
+    mode: linear
+    full_crop_size: 224
+    step_size: 16
+    epochs_per_stage: 1
+
+experiment_name: "progressive_res_linear_96_to_224"
+tags: ["ablate", "train"]
