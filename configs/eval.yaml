@@ -16,8 +16,8 @@ defaults:
   - debug: null
 
 # TODO Write your team name
-team_name: "TODO"
-tags: ["baseline", "evaluate"]
+team_name: ???
+tags: ["explore", "evaluate"]
 
 # seed for random number generators in pytorch, numpy and python.random
 seed: 0
