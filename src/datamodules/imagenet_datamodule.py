@@ -141,6 +141,19 @@ class ImageNetDataModule(LightningDataModule):
 
         self.train_transforms = self._build_train_transforms(skip_resize_crop)
         self.eval_transforms = self._build_eval_transforms(skip_resize_crop)
+        self._train_crop_size = train_crop_size
+        self.train_transforms = self._build_train_transforms(train_crop_size)
+
+        self.eval_transforms = T.Compose(
+            [
+                T.Resize(eval_resize_size, interpolation=self._interpolation_mode),
+                T.CenterCrop(eval_crop_size),
+                T.PILToTensor(),
+                T.ToDtype(torch.float, scale=True),
+                T.Normalize(mean=self._imagenet_mean, std=self._imagenet_std),
+                T.ToPureTensor(),
+            ]
+        )
 
         if cutmix_alpha or mixup_alpha:
             mixup_cutmix = self._get_mixup_cutmix(
@@ -277,6 +290,58 @@ class ImageNetDataModule(LightningDataModule):
             return False
         self.switch_to_phase_2()
         return True
+
+    def _build_train_transforms(self, train_crop_size: int) -> T.Compose:
+        train_transforms = [
+            T.RandomResizedCrop(train_crop_size, interpolation=self._interpolation_mode),
+        ]
+        if self.hparams.hflip_prob > 0:
+            train_transforms.append(T.RandomHorizontalFlip(self.hparams.hflip_prob))
+
+        auto_augment_policy = self.hparams.auto_augment_policy
+        if auto_augment_policy is not None:
+            if auto_augment_policy == "ra":
+                train_transforms.append(
+                    T.RandAugment(
+                        interpolation=self._interpolation_mode,
+                        magnitude=self.hparams.ra_magnitude,
+                    )
+                )
+            elif auto_augment_policy == "ta_wide":
+                train_transforms.append(
+                    T.TrivialAugmentWide(interpolation=self._interpolation_mode)
+                )
+            elif auto_augment_policy == "augmix":
+                train_transforms.append(
+                    T.AugMix(
+                        interpolation=self._interpolation_mode,
+                        severity=self.hparams.augmix_severity,
+                    )
+                )
+            else:
+                aa_policy = T.AutoAugmentPolicy(auto_augment_policy)
+                train_transforms.append(
+                    T.AutoAugment(policy=aa_policy, interpolation=self._interpolation_mode)
+                )
+
+        train_transforms.extend(
+            [
+                T.PILToTensor(),
+                T.ToDtype(torch.float, scale=True),
+                T.Normalize(mean=self._imagenet_mean, std=self._imagenet_std),
+            ]
+        )
+        if self.hparams.random_erase_prob > 0:
+            train_transforms.append(T.RandomErasing(p=self.hparams.random_erase_prob))
+        train_transforms.append(T.ToPureTensor())
+        return T.Compose(train_transforms)
+
+    def set_train_crop_size(self, crop_size: int) -> None:
+        """Update training crop size and swap transforms on the train dataset."""
+        self._train_crop_size = crop_size
+        self.train_transforms = self._build_train_transforms(crop_size)
+        if self.data_train is not None:
+            self.data_train.transform = self.train_transforms
 
     @property
     def num_classes(self) -> int:

@@ -6,7 +6,7 @@ log_time_series: True
 log_level: "WARNING"
 output_dir: ${paths.codecarbon_dir}${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}/
 tracking_mode: "process"
-gpu_ids: "0"  # Single-GPU tracking
+#gpu_ids: "0"  # Single-GPU tracking
 save_to_file: True
 log_interval: 1
 save_to_api: True
