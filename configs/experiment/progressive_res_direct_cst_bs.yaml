@@ -28,5 +28,5 @@ callbacks:
   model_checkpoint:
     every_n_epochs: 1
 
-experiment_name: "progressive_res_direct_cst_bs_96_to_224"
+experiment_name: "progressive_res_direct_cst_bs_res_sweep"
 tags: ["ablate", "train"]
