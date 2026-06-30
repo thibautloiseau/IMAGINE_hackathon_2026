@@ -182,6 +182,32 @@ class ImageNetModule(LightningModule):
         if self.hparams.compile and stage == "fit":
             self.net = torch.compile(self.net)
 
+    def set_base_learning_rate(self, lr: float) -> None:
+        """Set optimizer and scheduler base learning rates (e.g. when matching tokens per step)."""
+        optimizer = self.optimizers()
+        if isinstance(optimizer, (list, tuple)):
+            optimizer = optimizer[0]
+
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+            param_group["initial_lr"] = lr
+
+        schedulers = self.lr_schedulers()
+        if schedulers is None:
+            return
+        if not isinstance(schedulers, (list, tuple)):
+            schedulers = [schedulers]
+
+        for scheduler in schedulers:
+            self._update_scheduler_base_lrs(scheduler, lr)
+
+    def _update_scheduler_base_lrs(self, scheduler: Any, lr: float) -> None:
+        if isinstance(scheduler, torch.optim.lr_scheduler.SequentialLR):
+            for nested in scheduler._schedulers:
+                self._update_scheduler_base_lrs(nested, lr)
+        if hasattr(scheduler, "base_lrs"):
+            scheduler.base_lrs = [lr for _ in scheduler.base_lrs]
+
     def configure_optimizers(self) -> Dict[str, Any]:
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
         Normally you'd need one. But in the case of GANs or similar you might have multiple.
