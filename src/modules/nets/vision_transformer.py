@@ -11,6 +11,7 @@ from typing import Any, Callable, NamedTuple, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ConvStemConfig(NamedTuple):
@@ -137,15 +138,11 @@ class VisionTransformer(nn.Module):
             nn.init.zeros_(self.heads.head.weight)
             nn.init.zeros_(self.heads.head.bias)
 
-    def _process_input(self, x: torch.Tensor) -> torch.Tensor:
+    def _process_input(self, x: torch.Tensor) -> tuple[torch.Tensor, int, int]:
         n, c, h, w = x.shape
         p = self.patch_size
-        torch._assert(
-            h == self.image_size, f"Wrong image height! Expected {self.image_size} but got {h}!"
-        )
-        torch._assert(
-            w == self.image_size, f"Wrong image width! Expected {self.image_size} but got {w}!"
-        )
+        torch._assert(h % p == 0, f"Image height {h} is not divisible by patch size {p}!")
+        torch._assert(w % p == 0, f"Image width {w} is not divisible by patch size {p}!")
         n_h = h // p
         n_w = w // p
 
@@ -160,18 +157,18 @@ class VisionTransformer(nn.Module):
         # embedding dimension
         x = x.permute(0, 2, 1)
 
-        return x
+        return x, n_h, n_w
 
     def forward(self, x: torch.Tensor):
         # Reshape and permute the input tensor
-        x = self._process_input(x)
+        x, n_h, n_w = self._process_input(x)
         n = x.shape[0]
 
         # Expand the class token to the full batch
         batch_class_token = self.class_token.expand(n, -1, -1)
         x = torch.cat([batch_class_token, x], dim=1)
 
-        x = self.encoder(x)
+        x = self.encoder(x, n_h, n_w)
 
         # Classifier "token" as used by standard language architectures
         x = x[:, 0]
@@ -215,12 +212,49 @@ class Encoder(nn.Module):
         self.layers = nn.Sequential(layers)
         self.ln = norm_layer(hidden_dim)
 
-    def forward(self, input: torch.Tensor):
+    def forward(self, input: torch.Tensor, num_patches_h: int, num_patches_w: int):
         torch._assert(
             input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}"
         )
-        input = input + self.pos_embedding
+        pos_embedding = _interpolate_pos_embedding(
+            self.pos_embedding, num_patches_h, num_patches_w
+        )
+        input = input + pos_embedding
         return self.ln(self.layers(self.dropout(input)))
+
+
+def _interpolate_pos_embedding(
+    pos_embedding: torch.Tensor,
+    num_patches_h: int,
+    num_patches_w: int,
+) -> torch.Tensor:
+    """Interpolate position embeddings to match a new patch grid size."""
+    num_extra_tokens = 1
+    num_patches = num_patches_h * num_patches_w
+    seq_length = num_patches + num_extra_tokens
+    if pos_embedding.shape[1] == seq_length:
+        return pos_embedding
+
+    class_pos_embed = pos_embedding[:, :num_extra_tokens]
+    patch_pos_embed = pos_embedding[:, num_extra_tokens:]
+    dim = pos_embedding.shape[-1]
+
+    num_patches_stored = patch_pos_embed.shape[1]
+    size = int(math.sqrt(num_patches_stored))
+    torch._assert(
+        size * size == num_patches_stored,
+        f"Stored pos embed has {num_patches_stored} patches; expected a square grid.",
+    )
+
+    patch_pos_embed = patch_pos_embed.reshape(1, size, size, dim).permute(0, 3, 1, 2)
+    patch_pos_embed = F.interpolate(
+        patch_pos_embed,
+        size=(num_patches_h, num_patches_w),
+        mode="bicubic",
+        align_corners=False,
+    )
+    patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).reshape(1, num_patches, dim)
+    return torch.cat((class_pos_embed, patch_pos_embed), dim=1)
 
 
 class EncoderBlock(nn.Module):

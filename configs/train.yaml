@@ -21,7 +21,7 @@ defaults:
   # debugging config (enable through command line, e.g. `python train.py debug=default)
   - debug: null
 
-team_name: ???       # TODO write your team name HERE
+team_name: data_team       # TODO write your team name HERE
 experiment_name: ??? # TODO define this in your EXPERIMENT CONFIGS
 tags: ???            # TODO define this in your EXPERIMENT CONFIGS
 

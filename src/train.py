@@ -41,6 +41,7 @@ from src.utils import (
     log_hyperparameters,
     task_wrapper,
 )
+from src.utils.progressive_resolution import estimate_training_steps
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
@@ -68,11 +69,25 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     if "CosineAnnealingLR" in cfg.module["main_scheduler"]["_target_"]:
         datamodule.setup(stage="fit")  # Load training set
-        bsize = cfg.datamodule.batch_size
-        steps_per_epoch = math.ceil(len(datamodule.data_train) / bsize)
-        cfg.module.main_scheduler.T_max = (
-            cfg.trainer.max_epochs * steps_per_epoch - cfg.module.warmup_steps
-        )
+        callbacks_cfg = cfg.get("callbacks") or {}
+        prog_cb = callbacks_cfg.get("progressive_resolution")
+        if prog_cb and prog_cb.get("match_tokens"):
+            total_steps = estimate_training_steps(
+                num_train_samples=len(datamodule.data_train),
+                max_epochs=cfg.trainer.max_epochs,
+                start_crop_size=cfg.datamodule.train_crop_size,
+                full_crop_size=prog_cb.full_crop_size,
+                mode=prog_cb.mode,
+                step_size=prog_cb.get("step_size", 16),
+                epochs_per_stage=prog_cb.get("epochs_per_stage", 1),
+                switch_epoch=prog_cb.get("switch_epoch"),
+                reference_crop_size=prog_cb.full_crop_size,
+                reference_batch_size=prog_cb.reference_batch_size,
+            )
+        else:
+            bsize = cfg.datamodule.batch_size
+            total_steps = math.ceil(len(datamodule.data_train) / bsize) * cfg.trainer.max_epochs
+        cfg.module.main_scheduler.T_max = total_steps - cfg.module.warmup_steps
 
     log.info(f"Instantiating module <{cfg.module._target_}>")
     model: LightningModule = hydra.utils.instantiate(cfg.module)
