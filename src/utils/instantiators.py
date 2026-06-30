@@ -8,6 +8,7 @@ from lightning.pytorch.loggers import Logger
 from omegaconf import DictConfig
 
 from src.utils import pylogger
+from src.utils.codecarbon_utils import configure_codecarbon_gpu_ids
 
 log = pylogger.RankedLogger(__name__, rank_zero_only=True)
 
@@ -62,6 +63,7 @@ def instantiate_loggers(logger_cfg: DictConfig) -> List[Logger]:
 
 
 def instantiate_emissions_tracker(cfg: DictConfig) -> EmissionsTracker:
+    configure_codecarbon_gpu_ids(cfg)
 
     os.makedirs(cfg.codecarbon.output_dir, exist_ok=True)
 
