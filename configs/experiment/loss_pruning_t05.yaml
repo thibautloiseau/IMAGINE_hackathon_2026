@@ -1,0 +1,36 @@
+# @package _global_
+
+# Loss-based data pruning, threshold 0.5, CodeCarbon disabled.
+#
+# Same setup as `loss_pruning_t07` (no augmentations -> clean, deterministic per-sample loss
+# signal; CodeCarbon removed to avoid the api.codecarbon.io read-timeout spam) but with a
+# threshold of 0.5: any sample whose smoothed per-sample loss falls below 0.5 is dropped.
+# Sits between the 0.1 (conservative) and 0.7 (aggressive) pruning runs.
+#
+# to execute this experiment run:
+# uv run src/train.py experiment=loss_pruning_t05
+
+defaults:
+  - override /callbacks: with_pruning
+  - override /codecarbon: null
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+datamodule:
+  data_path: ${paths.data_dir}/IMAGENET-HACKATON-2026-jpeg-5
+  # Single switch that disables random resized crop, horizontal flip, auto-augment (RandAugment),
+  # random erasing, MixUp and CutMix, and uses the deterministic eval preprocessing for training.
+  train_augment: false
+
+callbacks:
+  loss_pruning:
+    threshold: 0.5 # remove samples whose smoothed per-sample loss falls below this
+    warmup_epochs: 3 # full-dataset training before pruning kicks in
+    reactivate_after: null # deterministic reintegration: int N = re-test a removed sample after N epochs
+    reactivate_prob: 0.1 # stochastic reintegration: each removed sample rejoins with 10% prob per epoch
+    min_keep_fraction: 0.1 # safety floor on the active dataset fraction
+
+# Remember to define experiment_name and tags in all your experiments!
+experiment_name: "loss_pruning_t05"
+tags: ["data", "train"]

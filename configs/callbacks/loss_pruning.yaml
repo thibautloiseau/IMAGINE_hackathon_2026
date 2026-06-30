@@ -1,0 +1,12 @@
+# Loss-based data pruning: drop training samples the model has already mastered.
+# See src/callbacks/loss_pruning.py
+
+loss_pruning:
+  _target_: src.callbacks.loss_pruning.LossBasedDataPruning
+  threshold: 0.1 # remove samples whose smoothed (EMA) per-sample loss drops below this value
+  ema_momentum: 0.9 # smoothing of the per-sample loss EMA; 0.0 = use only the latest epoch
+  warmup_epochs: 3 # train on the full dataset for this many epochs before pruning starts
+  reactivate_after: null # deterministic reintegration: null = off; int N = re-test after N epochs
+  reactivate_prob: 0.1 # stochastic reintegration: each removed sample rejoins with this prob/epoch
+  min_keep_fraction: 0.1 # always keep at least this fraction of the dataset active
+  verbose: True # log pruning statistics each epoch

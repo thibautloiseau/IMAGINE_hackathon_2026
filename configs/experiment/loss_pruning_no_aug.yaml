@@ -1,0 +1,34 @@
+# @package _global_
+
+# Loss-based data pruning with ALL data augmentation disabled.
+#
+# Augmentations are turned off so every sample is shown with the same deterministic
+# (resize + center-crop) preprocessing each epoch. This gives a clean, stable per-sample loss
+# signal for the pruning callback to decide which samples the model has already mastered.
+#
+# to execute this experiment run:
+# uv run src/train.py experiment=loss_pruning_no_aug
+
+defaults:
+  - override /callbacks: with_pruning
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+datamodule:
+  data_path: ${paths.data_dir}/IMAGENET-HACKATON-2026-jpeg-5
+  # Single switch that disables random resized crop, horizontal flip, auto-augment (RandAugment),
+  # random erasing, MixUp and CutMix, and uses the deterministic eval preprocessing for training.
+  train_augment: false
+
+callbacks:
+  loss_pruning:
+    threshold: 0.1 # remove samples whose smoothed per-sample loss falls below this
+    warmup_epochs: 3 # full-dataset training before pruning kicks in
+    reactivate_after: null # deterministic reintegration: int N = re-test a removed sample after N epochs
+    reactivate_prob: 0.1 # stochastic reintegration: each removed sample rejoins with 10% prob per epoch
+    min_keep_fraction: 0.1 # safety floor on the active dataset fraction
+
+# Remember to define experiment_name and tags in all your experiments!
+experiment_name: "loss_pruning_no_aug"
+tags: ["data", "train"]

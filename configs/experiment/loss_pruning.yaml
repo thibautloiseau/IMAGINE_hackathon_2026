@@ -1,0 +1,23 @@
+# @package _global_
+
+# Train with loss-based data pruning: easy samples (low per-sample loss) are dropped from training.
+# to execute this experiment run:
+# uv run src/train.py experiment=loss_pruning
+
+defaults:
+  - override /callbacks: with_pruning
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+callbacks:
+  loss_pruning:
+    threshold: 0.1 # remove samples whose smoothed per-sample loss falls below this
+    warmup_epochs: 3 # full-dataset training before pruning kicks in
+    reactivate_after: null # deterministic reintegration: int N = re-test a removed sample after N epochs
+    reactivate_prob: 0.1 # stochastic reintegration: each removed sample rejoins with 10% prob per epoch
+    min_keep_fraction: 0.1 # safety floor on the active dataset fraction
+
+# Remember to define experiment_name and tags in all your experiments!
+experiment_name: "loss_pruning"
+tags: ["data", "train"]

@@ -1,0 +1,22 @@
+# @package _global_
+
+# Baseline: standard training with the FULL data augmentation pipeline and no data pruning.
+#
+# Uses the default callbacks (no LossBasedDataPruning) and the default datamodule augmentations
+# (random resized crop, horizontal flip, RandAugment, MixUp). Serves as the augmented reference
+# point to compare against `baseline_no_aug` and the loss-pruning experiments.
+#
+# to execute this experiment run:
+# uv run src/train.py experiment=baseline_aug
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+datamodule:
+  data_path: ${paths.data_dir}/IMAGENET-HACKATON-2026-jpeg-5
+  # train_augment defaults to true -> keeps the augmentation pipeline defined in
+  # configs/datamodule/default.yaml (hflip_prob 0.5, auto_augment_policy 'ra', mixup_alpha 0.2).
+
+# Remember to define experiment_name and tags in all your experiments!
+experiment_name: "baseline_aug"
+tags: ["baseline", "train"]

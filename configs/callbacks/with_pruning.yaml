@@ -1,0 +1,6 @@
+# Default callbacks plus loss-based data pruning.
+# Enable with: `callbacks=with_pruning` (or via `experiment=loss_pruning`).
+
+defaults:
+  - default
+  - loss_pruning

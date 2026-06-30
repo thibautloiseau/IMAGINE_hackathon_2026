@@ -1,0 +1,24 @@
+# @package _global_
+
+# Baseline: standard training with ALL data augmentation disabled and no data pruning.
+#
+# Uses the default callbacks (no LossBasedDataPruning), so the full training set is used every
+# epoch. Augmentations are turned off (random resized crop, horizontal flip, auto-augment,
+# random erasing, MixUp and CutMix) and training uses the deterministic resize + center-crop
+# pipeline. Serves as the reference point for the loss-pruning experiments.
+#
+# to execute this experiment run:
+# uv run src/train.py experiment=baseline_no_aug
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+datamodule:
+  data_path: ${paths.data_dir}/IMAGENET-HACKATON-2026-jpeg-5
+  # Single switch that disables random resized crop, horizontal flip, auto-augment (RandAugment),
+  # random erasing, MixUp and CutMix, and uses the deterministic eval preprocessing for training.
+  train_augment: false
+
+# Remember to define experiment_name and tags in all your experiments!
+experiment_name: "baseline_no_aug"
+tags: ["baseline", "train"]

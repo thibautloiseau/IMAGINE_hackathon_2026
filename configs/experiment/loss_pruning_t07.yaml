@@ -1,0 +1,39 @@
+# @package _global_
+
+# Loss-based data pruning, aggressive threshold (0.7), CodeCarbon disabled.
+#
+# Same setup as `loss_pruning_no_aug` (no augmentations -> clean, deterministic per-sample
+# loss signal) but with a much higher pruning threshold (0.7 vs 0.1): any sample whose smoothed
+# per-sample loss falls below 0.7 is dropped, so the active set shrinks far more aggressively.
+#
+# CodeCarbon is removed from the config entirely (`override /codecarbon: null`). train.py gates the
+# tracker on `"codecarbon" in cfg`, so this falls back to a nullcontext -> no EmissionsTracker, and
+# therefore none of the api.codecarbon.io / geojs.io read-timeout tracebacks that spam the logs.
+#
+# to execute this experiment run:
+# uv run src/train.py experiment=loss_pruning_t07
+
+defaults:
+  - override /callbacks: with_pruning
+  - override /codecarbon: null
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+datamodule:
+  data_path: ${paths.data_dir}/IMAGENET-HACKATON-2026-jpeg-5
+  # Single switch that disables random resized crop, horizontal flip, auto-augment (RandAugment),
+  # random erasing, MixUp and CutMix, and uses the deterministic eval preprocessing for training.
+  train_augment: false
+
+callbacks:
+  loss_pruning:
+    threshold: 0.7 # remove samples whose smoothed per-sample loss falls below this (aggressive)
+    warmup_epochs: 3 # full-dataset training before pruning kicks in
+    reactivate_after: null # deterministic reintegration: int N = re-test a removed sample after N epochs
+    reactivate_prob: 0.1 # stochastic reintegration: each removed sample rejoins with 10% prob per epoch
+    min_keep_fraction: 0.1 # safety floor on the active dataset fraction
+
+# Remember to define experiment_name and tags in all your experiments!
+experiment_name: "loss_pruning_t07"
+tags: ["data", "train"]

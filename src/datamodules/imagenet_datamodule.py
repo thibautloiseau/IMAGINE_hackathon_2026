@@ -1,14 +1,33 @@
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import torchvision.transforms.v2 as T
 from lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, SubsetRandomSampler
 from torch.utils.data.dataloader import default_collate
 from torchvision.datasets import ImageFolder
 from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
+
+
+class IndexedDataset(Dataset):
+    """Wraps a dataset so that each item additionally carries its integer index.
+
+    Turns the usual `(image, target)` items into `(image, target, index)`. The index identifies
+    the sample in the underlying dataset and is what the `LossBasedDataPruning` callback uses to
+    track per-sample losses across epochs.
+    """
+
+    def __init__(self, dataset: Dataset) -> None:
+        self.dataset = dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int):
+        sample = self.dataset[index]
+        return (*sample, index)
 
 
 class UnlabeledImageFolder:
@@ -89,6 +108,7 @@ class ImageNetDataModule(LightningDataModule):
         cutmix_alpha: float = 0.0,
         mixup_alpha: float = 0.0,
         random_erase_prob: float = 0.0,
+        train_augment: bool = True,
         batch_size: int = 64,
         num_workers: int = 4,
         prefetch_factor: int = 2,
@@ -111,6 +131,10 @@ class ImageNetDataModule(LightningDataModule):
         :param cutmix_alpha: The alpha value for CutMix augmentation. Defaults to `0.0` (no CutMix).
         :param mixup_alpha: The alpha value for MixUp augmentation. Defaults to `0.0` (no MixUp).
         :param random_erase_prob: The probability of applying random erasing during training. Defaults to `0.0`.
+        :param train_augment: Whether to apply any training-time data augmentation. When `False`, all
+            augmentations are disabled (random resized crop, horizontal flip, auto-augment, random
+            erasing, MixUp and CutMix) and training uses the same deterministic resize + center-crop
+            pipeline as evaluation. Defaults to `True`.
         :param batch_size: The batch size. Defaults to `64`.
         :param num_workers: The number of workers. Defaults to `0`.
         :param prefetch_factor: The number of batches to prefetch. Defaults to `2`.
@@ -173,20 +197,32 @@ class ImageNetDataModule(LightningDataModule):
             ]
         )
 
-        if cutmix_alpha or mixup_alpha:
-            mixup_cutmix = self._get_mixup_cutmix(
+        # Disable all training-time augmentation: use the deterministic eval pipeline for training
+        # (no random resized crop / flip / auto-augment / random erasing) and no MixUp/CutMix.
+        if not train_augment:
+            self.train_transforms = self.eval_transforms
+
+        if train_augment and (cutmix_alpha or mixup_alpha):
+            self.mixup_cutmix = self._get_mixup_cutmix(
                 mixup_alpha=mixup_alpha,
                 cutmix_alpha=cutmix_alpha,
             )
-            self.collate_fn = lambda batch: mixup_cutmix(*default_collate(batch))
         else:
-            self.collate_fn = default_collate
+            self.mixup_cutmix = None
 
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
         self.data_test: Optional[Dataset] = None
 
         self.batch_size_per_device = batch_size
+
+        # Loss-based data pruning state. Disabled by default; enabled by the
+        # `LossBasedDataPruning` callback via `enable_pruning()`. When enabled the training set is
+        # wrapped in an `IndexedDataset` and sampled through a `SubsetRandomSampler` restricted to
+        # the currently active sample indices, which the callback updates every epoch.
+        self.prune: bool = False
+        self.train_sampler: Optional[SubsetRandomSampler] = None
+        self.active_indices: Optional[List[int]] = None
 
     @property
     def num_classes(self) -> int:
@@ -235,19 +271,72 @@ class ImageNetDataModule(LightningDataModule):
                     transform=self.eval_transforms,
                 )
 
+    def enable_pruning(self) -> None:
+        """Switch the training set into loss-based pruning mode.
+
+        Called by the `LossBasedDataPruning` callback during `setup`. Takes effect the next time
+        `train_dataloader()` is requested (which happens after all `setup` hooks have run).
+        """
+        self.prune = True
+
+    def set_active_indices(self, indices: Sequence[int]) -> None:
+        """Restrict the next training epoch to the given training-set sample indices.
+
+        Updates the sampler in place so the change is picked up on the next epoch without having to
+        rebuild the dataloader.
+
+        :param indices: The dataset indices of the samples to keep for training.
+        """
+        self.active_indices = list(indices)
+        if self.train_sampler is not None:
+            self.train_sampler.indices = self.active_indices
+
+    def _collate(self, batch: list) -> Any:
+        """Collate a batch, applying MixUp/CutMix and (in pruning mode) preserving sample indices.
+
+        :param batch: A list of `(image, target)` items, or `(image, target, index)` items when
+            pruning is enabled.
+        :return: `(images, targets)`, or `(images, targets, indices)` when pruning is enabled.
+        """
+        if self.prune:
+            indices = torch.as_tensor([item[2] for item in batch])
+            x, y = default_collate([(item[0], item[1]) for item in batch])
+            if self.mixup_cutmix is not None:
+                x, y = self.mixup_cutmix(x, y)
+            return x, y, indices
+
+        x, y = default_collate(batch)
+        if self.mixup_cutmix is not None:
+            x, y = self.mixup_cutmix(x, y)
+        return x, y
+
     def train_dataloader(self) -> DataLoader[Any]:
         """Create and return the train dataloader.
 
         :return: The train dataloader.
         """
+        dataset: Dataset = self.data_train
+        sampler: Optional[SubsetRandomSampler] = None
+        shuffle = True
+
+        if self.prune:
+            # Wrap so each item carries its index, and sample only the currently active subset.
+            dataset = IndexedDataset(self.data_train)
+            if self.active_indices is None:
+                self.active_indices = list(range(len(self.data_train)))
+            self.train_sampler = SubsetRandomSampler(self.active_indices)
+            sampler = self.train_sampler
+            shuffle = False
+
         return DataLoader(
-            dataset=self.data_train,
+            dataset=dataset,
             batch_size=self.batch_size_per_device,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             prefetch_factor=self.hparams.prefetch_factor,
-            collate_fn=self.collate_fn,
-            shuffle=True,
+            collate_fn=self._collate,
+            sampler=sampler,
+            shuffle=shuffle,
         )
 
     def val_dataloader(self) -> DataLoader[Any]:

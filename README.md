@@ -125,6 +125,28 @@ To keep things tidy, please define your `team_name` in the [main train config](.
     - Project stage options: `data`, `explore`, `baseline`, `ablate`, `hyperparam`, `final`, `<custom tag>`
     - Run type options: `train`, `pre-train`, `post-train`, `debug`, `<custom tag>`
 
+### Loss-Based Data Pruning
+You can speed up training by dropping training samples the model has already mastered. The
+[`LossBasedDataPruning`](./src/callbacks/loss_pruning.py) callback tracks an exponential moving
+average of each sample's per-sample training loss and, after a short warm-up, removes every sample
+whose smoothed loss falls below a `threshold` (the examples the model is consistently good at), so
+training time is spent on the harder, still-informative samples.
+
+Enable it via the ready-made experiment:
+```bash
+uv run src/train.py experiment=loss_pruning
+```
+or by adding the callback to any run with `callbacks=with_pruning`. Key options (see
+[`configs/callbacks/loss_pruning.yaml`](./configs/callbacks/loss_pruning.yaml)):
+- `threshold`: remove samples whose EMA loss drops below this value (cross-entropy starts ~6.9 for ImageNet-1k; easy samples fall well below `1.0`).
+- `warmup_epochs`: epochs of full-dataset training before pruning starts.
+- `reactivate_after`: `null` removes easy samples **permanently**; an int `N` removes them for **`N` epochs** and then shows them again to be re-evaluated.
+- `min_keep_fraction`: safety floor — always keep at least this fraction of the dataset active.
+
+The number of active/removed samples is logged each epoch under `prune/*`. Note: this is built for
+single-GPU training, and with MixUp/CutMix the per-sample loss (and thus the pruning signal) is
+measured on the *mixed* sample.
+
 ### Hyperparameter Search
 You can use the Hydra `--multirun` (or `-m`) option to launch a simple, *sequential* grid search as shown in the [documentation](https://hydra.cc/docs/tutorials/basic/running_your_app/multi-run/). For example:
 

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from lightning import LightningModule
@@ -65,8 +65,10 @@ class ImageNetModule(LightningModule):
 
         self.net = net
 
-        # loss function
-        self.criterion = torch.nn.CrossEntropyLoss()
+        # loss function. `reduction="none"` keeps a per-sample loss so that
+        # loss-based data pruning (see `LossBasedDataPruning` callback) can track
+        # how well the model does on each individual training example.
+        self.criterion = torch.nn.CrossEntropyLoss(reduction="none")
 
         # metric objects for calculating and averaging accuracy across batches
         self.train_acc1 = Accuracy(task="multiclass", num_classes=1000)
@@ -97,23 +99,30 @@ class ImageNetModule(LightningModule):
         self.val_acc5.reset()
 
     def model_step(
-        self, batch: Tuple[torch.Tensor, torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, batch: Tuple[torch.Tensor, ...]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Perform a single model step on a batch of data.
 
-        :param batch: A batch of data (a tuple) containing the input tensor of images and target labels.
+        :param batch: A batch of data (a tuple) containing the input tensor of images and target
+            labels. When loss-based data pruning is enabled the batch additionally carries the
+            dataset indices of each sample, i.e. `(images, targets, indices)`.
 
         :return: A tuple containing (in order):
-            - A tensor of losses.
+            - A tensor of per-sample losses (shape `[batch_size]`).
             - A tensor of logits.
             - A tensor of target labels.
+            - A tensor of dataset sample indices, or `None` when pruning is disabled.
         """
-        x, y = batch
+        if len(batch) == 3:
+            x, y, idx = batch
+        else:
+            x, y = batch
+            idx = None
         logits = self.forward(x)
-        loss = self.criterion(logits, y)
+        sample_loss = self.criterion(logits, y)
         if y.dim() > 1:
             y = y.argmax(dim=1)
-        return loss, logits, y.long()
+        return sample_loss, logits, y.long(), idx
 
     def training_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int
@@ -123,9 +132,11 @@ class ImageNetModule(LightningModule):
         :param batch: A batch of data (a tuple) containing the input tensor of images and target
             labels.
         :param batch_idx: The index of the current batch.
-        :return: A tensor of losses between model predictions and targets.
+        :return: A tensor of losses between model predictions and targets, or a dict additionally
+            carrying the per-sample losses and dataset indices when pruning is enabled.
         """
-        loss, logits, targets = self.model_step(batch)
+        sample_loss, logits, targets, idx = self.model_step(batch)
+        loss = sample_loss.mean()
 
         # update and log metrics
         self.train_loss(loss)
@@ -135,7 +146,15 @@ class ImageNetModule(LightningModule):
         self.log("train/acc1", self.train_acc1, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train/acc5", self.train_acc5, on_step=True, on_epoch=True, prog_bar=True)
 
-        # return loss or backpropagation will fail
+        # When pruning is enabled, expose the per-sample losses and their dataset indices so the
+        # `LossBasedDataPruning` callback can decide which samples to drop. Otherwise return the
+        # scalar loss as usual. (Backpropagation always uses `loss`.)
+        if idx is not None:
+            return {
+                "loss": loss,
+                "sample_loss": sample_loss.detach(),
+                "sample_idx": idx,
+            }
         return loss
 
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
@@ -145,7 +164,8 @@ class ImageNetModule(LightningModule):
             labels.
         :param batch_idx: The index of the current batch.
         """
-        loss, logits, targets = self.model_step(batch)
+        sample_loss, logits, targets, _ = self.model_step(batch)
+        loss = sample_loss.mean()
 
         # update and log metrics
         self.val_loss(loss)
@@ -162,7 +182,7 @@ class ImageNetModule(LightningModule):
             labels.
         :param batch_idx: The index of the current batch.
         """
-        _, logits, targets = self.model_step(batch)
+        _, logits, targets, _ = self.model_step(batch)
 
         # update and log metrics
         self.test_acc1(logits, targets)
