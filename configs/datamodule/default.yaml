@@ -14,5 +14,5 @@ interpolation: 'bilinear'
 hflip_prob: 0.5
 auto_augment_policy: 'ra'
 ra_magnitude: 10
-cutmix_alpha: 0.0
-mixup_alpha: 0.2
+cutmix_alpha: 0.0 # 0.0 = CutMix disabled
+mixup_alpha: 0.0 # 0.0 = MixUp disabled (keeps the per-sample loss/confidence pruning signal clean)

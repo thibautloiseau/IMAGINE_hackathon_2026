@@ -44,7 +44,7 @@ class ImageNetModule(LightningModule):
         net: torch.nn.Module,
         compile: bool,
         optimizer: torch.optim.Optimizer,
-        warmup_steps: int,
+        warmup_epochs: int,
         main_scheduler: torch.optim.lr_scheduler,
         warmup_scheduler: torch.optim.lr_scheduler = None,
     ) -> None:
@@ -52,8 +52,7 @@ class ImageNetModule(LightningModule):
 
         :param net: The model to train.
         :param compile: Whether to use `torch.compile` on the model for training.
-        :param optimizer: The optimizer to use for training.
-        :param warmup_steps: The number of warmup steps to use for training. If 0, no warmup scheduler will be used.
+        :param warmup_epochs: The number of warmup epochs to use for training. If 0, no warmup scheduler will be used.
         :param main_scheduler: The main learning rate scheduler to use for training.
         :param warmup_scheduler: The learning rate scheduler to use for warmup.
         """
@@ -153,9 +152,33 @@ class ImageNetModule(LightningModule):
             return {
                 "loss": loss,
                 "sample_loss": sample_loss.detach(),
+                "sample_top5_margin": self._top5_margin(logits, targets),
                 "sample_idx": idx,
             }
         return loss
+
+    @staticmethod
+    def _top5_margin(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Per-sample top-5 confidence signal for confidence-based data pruning.
+
+        Measures how much probability mass the model concentrates on its five most likely classes
+        relative to all the others: ``margin = sum(top-5 probs) - sum(remaining probs)``, which is
+        positive exactly when the top-5 set holds more than half of the total probability mass.
+        Samples whose true label is *not* inside the predicted top-5 are forced to the minimum value
+        (``-1``) so they are never considered "mastered" — we don't want to prune an example the
+        model still gets wrong at top-5. See `LossBasedDataPruning` (``criterion="top5_confidence"``).
+
+        :param logits: Model logits, shape `[batch_size, num_classes]`.
+        :param targets: Hard target labels, shape `[batch_size]`.
+        :return: A tensor of top-5 margins in `[-1, 1]`, shape `[batch_size]`.
+        """
+        with torch.no_grad():
+            probs = logits.softmax(dim=1)
+            top5_vals, top5_idx = probs.topk(5, dim=1)
+            top5_mass = top5_vals.sum(dim=1)
+            margin = 2.0 * top5_mass - 1.0  # sum(top-5) - sum(rest); > 0 iff top-5 mass > 0.5
+            in_top5 = (top5_idx == targets.unsqueeze(1)).any(dim=1)
+            return torch.where(in_top5, margin, torch.full_like(margin, -1.0)).detach()
 
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
         """Perform a single validation step on a batch of data from the validation set.
@@ -213,20 +236,24 @@ class ImageNetModule(LightningModule):
         """
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
         main_scheduler = self.hparams.main_scheduler(optimizer=optimizer)
-        if self.hparams.warmup_steps > 0:
+        if self.hparams.warmup_epochs > 0:
             warmup_scheduler = self.hparams.warmup_scheduler(optimizer=optimizer)
             scheduler = torch.optim.lr_scheduler.SequentialLR(
                 optimizer,
                 schedulers=[warmup_scheduler, main_scheduler],
-                milestones=[self.hparams.warmup_steps],
+                milestones=[self.hparams.warmup_epochs],
             )
         else:
             scheduler = main_scheduler
+        # Step the LR schedule once per epoch. Anchoring warmup + cosine to epochs (fixed at
+        # max_epochs) rather than to a step count keeps the schedule correct under dynamic data
+        # pruning, which changes the number of steps per epoch: the cosine still anneals to eta_min
+        # exactly at the final epoch instead of stopping early.
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",
+                "interval": "epoch",
                 "frequency": 1,
             },
         }

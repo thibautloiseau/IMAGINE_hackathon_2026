@@ -16,11 +16,12 @@ uv.lock
 credentials.json
 electricity_maps_key.txt
 data/*
+# ignore a local `data` symlink/dir (e.g. pointing at external dataset storage)
+/data
 logs/*
 codecarbon/*
 predictions/*
 
-!data/.gitkeep
 !logs/.gitkeep
 !codecarbon/.gitkeep
 !predictions/.gitkeep

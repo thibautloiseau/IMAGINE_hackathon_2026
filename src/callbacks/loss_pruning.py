@@ -14,12 +14,20 @@ _FOREVER = 1_000_000_000
 class LossBasedDataPruning(Callback):
     """Drop training samples the model has already mastered.
 
-    The model is asked to report a per-sample training loss for every example it sees (see
-    `ImageNetModule.training_step`, which returns `sample_loss`/`sample_idx`). This callback keeps an
-    exponential moving average (EMA) of that loss per sample and, once a short warm-up has passed,
-    removes every sample whose smoothed loss has dropped below `threshold` — i.e. the examples the
-    model is consistently good at — so that training time is spent on the harder, still-informative
-    samples.
+    For every example it sees, the model reports a per-sample "prune signal" (see
+    `ImageNetModule.training_step`). This callback keeps an exponential moving average (EMA) of that
+    signal per sample and, once a short warm-up has passed, removes every sample the model is
+    consistently good at — so that training time is spent on the harder, still-informative samples.
+
+    Two signals are supported via ``criterion``:
+
+    * ``"loss"`` (default): the per-sample training loss (`sample_loss`). A sample is removed once
+      its smoothed loss drops **below** `threshold`.
+    * ``"top5_confidence"``: a per-sample top-5 confidence margin (`sample_top5_margin`), equal to
+      `sum(top-5 probs) - sum(rest)` when the true label is inside the predicted top-5 and `-1`
+      otherwise. A sample is removed once its smoothed margin rises **above** `threshold` (with the
+      natural cutoff `threshold=0`, i.e. the top-5 holds more probability mass than everything else
+      combined). Aimed at optimizing top-5 accuracy without dropping samples still wrong at top-5.
 
     Removal can be permanent or temporary:
 
@@ -41,6 +49,7 @@ class LossBasedDataPruning(Callback):
     def __init__(
         self,
         threshold: float = 0.1,
+        criterion: str = "loss",
         ema_momentum: float = 0.9,
         warmup_epochs: int = 3,
         reactivate_after: Optional[int] = None,
@@ -50,9 +59,16 @@ class LossBasedDataPruning(Callback):
     ) -> None:
         """Initialize a `LossBasedDataPruning` callback.
 
-        :param threshold: Samples whose EMA loss is below this value are considered "learned" and
-            removed from training. Cross-entropy starts around `ln(num_classes)` (~6.9 for
-            ImageNet-1k) and easy, confidently-correct samples fall well below `1.0`.
+        :param threshold: Cutoff on the smoothed per-sample prune signal above/below which a sample
+            counts as "learned" and is removed. With ``criterion="loss"`` a sample is removed once
+            its EMA loss falls **below** this value (cross-entropy starts around `ln(num_classes)`,
+            ~6.9 for ImageNet-1k, and easy, confidently-correct samples fall well below `1.0`). With
+            ``criterion="top5_confidence"`` a sample is removed once its EMA top-5 margin rises
+            **above** this value (`0.0` = the top-5 predictions hold over half of the probability
+            mass). Defaults to `0.1`.
+        :param criterion: Which per-sample signal drives pruning: ``"loss"`` (per-sample training
+            loss) or ``"top5_confidence"`` (top-5 confidence margin, for optimizing top-5 accuracy).
+            Defaults to ``"loss"``.
         :param ema_momentum: Momentum of the per-sample loss EMA, in `[0, 1)`. `0.0` uses only the
             most recent epoch's loss; higher values smooth more aggressively. Defaults to `0.9`.
         :param warmup_epochs: Number of epochs to train on the full dataset before any pruning
@@ -69,7 +85,14 @@ class LossBasedDataPruning(Callback):
         :param verbose: Whether to log pruning statistics each epoch. Defaults to `True`.
         """
         super().__init__()
+        if criterion not in ("loss", "top5_confidence"):
+            raise ValueError(
+                f"Unknown criterion {criterion!r}; expected 'loss' or 'top5_confidence'."
+            )
         self.threshold = threshold
+        self.criterion = criterion
+        # Key of the per-sample signal to read from `training_step` outputs for this criterion.
+        self._signal_key = "sample_loss" if criterion == "loss" else "sample_top5_margin"
         self.ema_momentum = ema_momentum
         self.warmup_epochs = warmup_epochs
         self.reactivate_after = reactivate_after
@@ -79,7 +102,7 @@ class LossBasedDataPruning(Callback):
 
         # State (allocated once the dataset size is known, in `on_train_start`).
         self.num_samples: Optional[int] = None
-        self.sample_loss: Optional[torch.Tensor] = None  # EMA of per-sample loss (NaN = unseen)
+        self.sample_score: Optional[torch.Tensor] = None  # EMA of per-sample signal (NaN = unseen)
         self.seen: Optional[torch.Tensor] = None  # whether a sample has ever contributed to the EMA
         self.inactive_until: Optional[torch.Tensor] = None  # first epoch a sample is active again
 
@@ -87,7 +110,7 @@ class LossBasedDataPruning(Callback):
 
     def _init_state(self, num_samples: int) -> None:
         self.num_samples = num_samples
-        self.sample_loss = torch.full((num_samples,), float("nan"))
+        self.sample_score = torch.full((num_samples,), float("nan"))
         self.seen = torch.zeros(num_samples, dtype=torch.bool)
         self.inactive_until = torch.zeros(num_samples, dtype=torch.long)
 
@@ -105,7 +128,7 @@ class LossBasedDataPruning(Callback):
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         num_samples = len(trainer.datamodule.data_train)
         # Allocate fresh state, unless a checkpoint already restored a matching one.
-        if self.sample_loss is None or self.num_samples != num_samples:
+        if self.sample_score is None or self.num_samples != num_samples:
             self._init_state(num_samples)
         trainer.datamodule.set_active_indices(self._active_indices(trainer.current_epoch))
 
@@ -119,16 +142,16 @@ class LossBasedDataPruning(Callback):
         batch: Any,
         batch_idx: int,
     ) -> None:
-        if not isinstance(outputs, dict) or "sample_loss" not in outputs:
+        if not isinstance(outputs, dict) or self._signal_key not in outputs:
             return
 
-        losses = outputs["sample_loss"].detach().float().cpu()
+        signal = outputs[self._signal_key].detach().float().cpu()
         idx = outputs["sample_idx"].detach().cpu().long()
 
-        prev = self.sample_loss[idx]
+        prev = self.sample_score[idx]
         m = self.ema_momentum
-        updated = torch.where(torch.isnan(prev), losses, m * prev + (1.0 - m) * losses)
-        self.sample_loss[idx] = updated
+        updated = torch.where(torch.isnan(prev), signal, m * prev + (1.0 - m) * signal)
+        self.sample_score[idx] = updated
         self.seen[idx] = True
 
     # ------------------------------------------------------------------ per-epoch pruning
@@ -181,9 +204,15 @@ class LossBasedDataPruning(Callback):
         """Remove newly-learned samples and apply the minimum-keep safety floor."""
         next_epoch = epoch + 1
 
-        # Samples that were active this epoch, have a loss estimate, and are now below threshold.
+        # Samples that were active this epoch, have a signal estimate, and cross the threshold. For
+        # loss the "learned" side is below the threshold; for top-5 confidence it is above it.
+        # (NaN comparisons are False, so unseen samples are excluded even before the `seen` mask.)
         currently_active = self.inactive_until <= epoch
-        learned = self.seen & currently_active & (self.sample_loss < self.threshold)
+        if self.criterion == "loss":
+            crossed = self.sample_score < self.threshold
+        else:  # top5_confidence
+            crossed = self.sample_score > self.threshold
+        learned = self.seen & currently_active & crossed
 
         if self.reactivate_after is None:
             self.inactive_until[learned] = _FOREVER
@@ -202,8 +231,9 @@ class LossBasedDataPruning(Callback):
 
         need = min_active - num_active
         removed_idx = torch.nonzero(inactive_mask, as_tuple=False).flatten()
-        # Keep the removed samples with the *highest* loss (the least-learned ones).
-        order = torch.argsort(self.sample_loss[removed_idx], descending=True)
+        # Reactivate the least-learned of the removed samples: highest loss, or lowest top-5 margin.
+        descending = self.criterion == "loss"
+        order = torch.argsort(self.sample_score[removed_idx], descending=descending)
         to_reactivate = removed_idx[order[:need]]
         self.inactive_until[to_reactivate] = 0
 
@@ -214,11 +244,11 @@ class LossBasedDataPruning(Callback):
     # ------------------------------------------------------------------ checkpointing
 
     def state_dict(self) -> Dict[str, Any]:
-        if self.sample_loss is None:
+        if self.sample_score is None:
             return {}
         return {
             "num_samples": self.num_samples,
-            "sample_loss": self.sample_loss,
+            "sample_score": self.sample_score,
             "seen": self.seen,
             "inactive_until": self.inactive_until,
         }
@@ -227,6 +257,7 @@ class LossBasedDataPruning(Callback):
         if not state_dict:
             return
         self.num_samples = state_dict["num_samples"]
-        self.sample_loss = state_dict["sample_loss"]
+        # Fall back to the legacy "sample_loss" key for checkpoints written before `criterion`.
+        self.sample_score = state_dict.get("sample_score", state_dict.get("sample_loss"))
         self.seen = state_dict["seen"]
         self.inactive_until = state_dict["inactive_until"]

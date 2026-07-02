@@ -9,16 +9,20 @@ optimizer:
 main_scheduler:
     _target_: torch.optim.lr_scheduler.CosineAnnealingLR
     _partial_: true
-    T_max: null # Requires knowing total number of training steps, initialized in train.py
+    T_max: null # Number of epochs to anneal over; set in train.py = max_epochs - warmup_epochs.
     eta_min: 0
 
-warmup_steps: 1e4
+# Epoch-based warmup. The schedulers are stepped once per epoch (interval="epoch"), so both warmup
+# and the cosine are anchored to epochs (fixed at max_epochs) rather than to a dataset-size-derived
+# step count. This keeps the schedule correct under dynamic data pruning: the cosine always reaches
+# eta_min exactly at the final epoch, regardless of how many steps each (pruned) epoch contains.
+warmup_epochs: 2 # epochs to ramp LR from start_factor*lr up to peak lr before the cosine anneal.
 
 warmup_scheduler:
     _target_: torch.optim.lr_scheduler.LinearLR
     _partial_: true
     start_factor: 1e-2
-    total_iters: ${module.warmup_steps}
+    total_iters: ${module.warmup_epochs}
 
 # ViT-S/16
 net:

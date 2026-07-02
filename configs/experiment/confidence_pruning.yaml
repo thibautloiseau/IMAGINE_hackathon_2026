@@ -1,0 +1,36 @@
+# @package _global_
+
+# Confidence-based data pruning: drop samples the model is already confident about at top-5.
+#
+# Instead of a per-sample loss threshold, a sample is pruned once the model concentrates more
+# probability mass on its top-5 predictions than on all other classes combined
+# (sum(top-5) > sum(rest), i.e. the top-5 holds > 50% of the mass) *and* the true label is inside
+# that top-5 -- so we never drop a sample the model still gets wrong at top-5. Aimed at optimizing
+# top-5 accuracy. MixUp/CutMix are disabled (see configs/datamodule/default.yaml) so the per-sample
+# confidence signal is measured on clean, unmixed samples.
+#
+# to execute this experiment run:
+# uv run src/train.py experiment=confidence_pruning
+
+defaults:
+  - override /callbacks: with_pruning
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+datamodule:
+  data_path: ${paths.data_dir}/IMAGINE_Hackathon
+
+callbacks:
+  loss_pruning:
+    criterion: top5_confidence # prune on top-5 confidence instead of per-sample loss
+    ema_momentum: 0.5 # ~2-epoch memory (was 0.9 ≈ 10-epoch); more responsive so easy samples cross the threshold sooner
+    threshold: 0.0 # remove samples whose smoothed top-5 margin rises above this (0.0 = top-5 > rest)
+    warmup_epochs: 2 # full-dataset training before pruning kicks in
+    reactivate_after: null # deterministic reintegration: int N = re-test a removed sample after N epochs
+    reactivate_prob: 0.1 # stochastic reintegration: each removed sample rejoins with 10% prob per epoch
+    min_keep_fraction: 0.1 # safety floor on the active dataset fraction
+
+# Remember to define experiment_name and tags in all your experiments!
+experiment_name: "confidence_pruning"
+tags: ["data", "train"]

@@ -125,27 +125,31 @@ To keep things tidy, please define your `team_name` in the [main train config](.
     - Project stage options: `data`, `explore`, `baseline`, `ablate`, `hyperparam`, `final`, `<custom tag>`
     - Run type options: `train`, `pre-train`, `post-train`, `debug`, `<custom tag>`
 
-### Loss-Based Data Pruning
+### Data Pruning
 You can speed up training by dropping training samples the model has already mastered. The
 [`LossBasedDataPruning`](./src/callbacks/loss_pruning.py) callback tracks an exponential moving
-average of each sample's per-sample training loss and, after a short warm-up, removes every sample
-whose smoothed loss falls below a `threshold` (the examples the model is consistently good at), so
-training time is spent on the harder, still-informative samples.
+average of a per-sample signal and, after a short warm-up, removes every sample the model is
+consistently good at, so training time is spent on the harder, still-informative samples. Two
+criteria are available:
+- `criterion: loss` (default): remove a sample once its smoothed **per-sample loss** falls below `threshold` (cross-entropy starts ~6.9 for ImageNet-1k; easy samples fall well below `1.0`).
+- `criterion: top5_confidence`: remove a sample once its smoothed **top-5 confidence margin** rises above `threshold`, i.e. the model puts more probability mass on its top-5 predictions than on all other classes combined (`threshold: 0.0`), *and* the true label is inside that top-5. Aimed at optimizing top-5 accuracy without dropping samples still wrong at top-5.
 
-Enable it via the ready-made experiment:
+Enable it via a ready-made experiment:
 ```bash
-uv run src/train.py experiment=loss_pruning
+uv run src/train.py experiment=loss_pruning       # loss-based
+uv run src/train.py experiment=confidence_pruning  # top-5 confidence-based
 ```
 or by adding the callback to any run with `callbacks=with_pruning`. Key options (see
 [`configs/callbacks/loss_pruning.yaml`](./configs/callbacks/loss_pruning.yaml)):
-- `threshold`: remove samples whose EMA loss drops below this value (cross-entropy starts ~6.9 for ImageNet-1k; easy samples fall well below `1.0`).
+- `criterion`: `loss` or `top5_confidence` (which per-sample signal drives pruning).
+- `threshold`: cutoff on the smoothed signal (see per-criterion meaning above).
 - `warmup_epochs`: epochs of full-dataset training before pruning starts.
 - `reactivate_after`: `null` removes easy samples **permanently**; an int `N` removes them for **`N` epochs** and then shows them again to be re-evaluated.
 - `min_keep_fraction`: safety floor — always keep at least this fraction of the dataset active.
 
 The number of active/removed samples is logged each epoch under `prune/*`. Note: this is built for
-single-GPU training, and with MixUp/CutMix the per-sample loss (and thus the pruning signal) is
-measured on the *mixed* sample.
+single-GPU training. MixUp/CutMix are disabled by default so the per-sample signal is measured on
+clean, unmixed samples; if you re-enable them the signal is measured on the *mixed* sample.
 
 ### Hyperparameter Search
 You can use the Hydra `--multirun` (or `-m`) option to launch a simple, *sequential* grid search as shown in the [documentation](https://hydra.cc/docs/tutorials/basic/running_your_app/multi-run/). For example:

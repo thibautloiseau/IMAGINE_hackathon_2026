@@ -3,8 +3,9 @@
 
 loss_pruning:
   _target_: src.callbacks.loss_pruning.LossBasedDataPruning
-  threshold: 0.1 # remove samples whose smoothed (EMA) per-sample loss drops below this value
-  ema_momentum: 0.9 # smoothing of the per-sample loss EMA; 0.0 = use only the latest epoch
+  criterion: loss # prune signal: "loss" (per-sample loss) or "top5_confidence" (top-5 margin)
+  threshold: 0.1 # loss: remove below this smoothed loss; top5_confidence: remove above this margin
+  ema_momentum: 0.9 # smoothing of the per-sample signal EMA; 0.0 = use only the latest epoch
   warmup_epochs: 3 # train on the full dataset for this many epochs before pruning starts
   reactivate_after: null # deterministic reintegration: null = off; int N = re-test after N epochs
   reactivate_prob: 0.1 # stochastic reintegration: each removed sample rejoins with this prob/epoch

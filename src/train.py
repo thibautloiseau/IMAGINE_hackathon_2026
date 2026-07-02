@@ -1,5 +1,4 @@
 import contextlib
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import hydra
@@ -67,12 +66,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datamodule)
 
     if "CosineAnnealingLR" in cfg.module["main_scheduler"]["_target_"]:
-        datamodule.setup(stage="fit")  # Load training set
-        bsize = cfg.datamodule.batch_size
-        steps_per_epoch = math.ceil(len(datamodule.data_train) / bsize)
-        cfg.module.main_scheduler.T_max = (
-            cfg.trainer.max_epochs * steps_per_epoch - cfg.module.warmup_steps
-        )
+        # Anneal the cosine over EPOCHS (fixed at max_epochs), with the scheduler stepped once per
+        # epoch (interval="epoch" in the module). Deriving the horizon from epochs rather than a
+        # step count based on the dataset size keeps the schedule correct under dynamic data pruning,
+        # which changes the number of steps per epoch: the cosine still reaches eta_min exactly at
+        # the final epoch instead of stopping mid-anneal.
+        cfg.module.main_scheduler.T_max = cfg.trainer.max_epochs - cfg.module.warmup_epochs
 
     log.info(f"Instantiating module <{cfg.module._target_}>")
     model: LightningModule = hydra.utils.instantiate(cfg.module)
