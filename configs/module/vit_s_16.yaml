@@ -12,11 +12,14 @@ main_scheduler:
     T_max: null # Number of epochs to anneal over; set in train.py = max_epochs - warmup_epochs.
     eta_min: 0
 
-# Epoch-based warmup. The schedulers are stepped once per epoch (interval="epoch"), so both warmup
-# and the cosine are anchored to epochs (fixed at max_epochs) rather than to a dataset-size-derived
-# step count. This keeps the schedule correct under dynamic data pruning: the cosine always reaches
-# eta_min exactly at the final epoch, regardless of how many steps each (pruned) epoch contains.
-warmup_epochs: 2 # epochs to ramp LR from start_factor*lr up to peak lr before the cosine anneal.
+# Epoch-anchored, per-step LR schedule (applied in ImageNetModule.on_train_batch_start). The LR is a
+# continuous function of fractional-epoch progress (current_epoch + batch_idx/num_training_batches),
+# so warmup and the cosine are anchored to epochs (fixed at max_epochs) yet still change smoothly
+# *within* each epoch. This keeps the schedule correct under dynamic data pruning — which changes the
+# number of steps per epoch — while avoiding the "first epoch stuck at start_factor*lr" artifact of a
+# purely per-epoch schedule. `main_scheduler`/`warmup_scheduler` below are reused only for their
+# shape params (start_factor, eta_min); they are not instantiated as Lightning schedulers.
+warmup_epochs: 4 # epochs to ramp LR from start_factor*lr up to peak lr before the cosine anneal.
 
 warmup_scheduler:
     _target_: torch.optim.lr_scheduler.LinearLR

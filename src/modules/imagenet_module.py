@@ -1,3 +1,4 @@
+import math
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -225,38 +226,65 @@ class ImageNetModule(LightningModule):
         if self.hparams.compile and stage == "fit":
             self.net = torch.compile(self.net)
 
+    def on_train_batch_start(self, batch: Any, batch_idx: int) -> None:
+        """Apply the per-step, epoch-anchored warmup + cosine learning rate for this step.
+
+        The LR is a continuous function of *fractional* epoch progress
+        ``p = current_epoch + batch_idx / num_training_batches``: a linear warmup from
+        ``start_factor * lr`` up to the peak ``lr`` over ``warmup_epochs``, then a cosine anneal to
+        ``eta_min`` reached exactly at ``max_epochs``. Measuring progress in epochs — with
+        ``num_training_batches`` recomputed each epoch to match the pruned active subset
+        (``reload_dataloaders_every_n_epochs=1``) — keeps the ramp smooth *within* every epoch (like
+        the old step-based warmup) while still finishing precisely at ``max_epochs``, no matter how
+        many steps data pruning removes.
+        """
+        if not hasattr(self, "_base_lrs"):
+            return
+        num_batches = self.trainer.num_training_batches
+        if not num_batches or num_batches == float("inf"):
+            return
+
+        progress = self.trainer.current_epoch + batch_idx / num_batches
+        warmup_epochs = self.hparams.warmup_epochs
+        max_epochs = self.trainer.max_epochs
+
+        if warmup_epochs > 0 and progress < warmup_epochs:
+            start_factor = self._warmup_start_factor
+            factor = start_factor + (1.0 - start_factor) * (progress / warmup_epochs)
+            factors = [factor] * len(self._base_lrs)
+        else:
+            span = max(max_epochs - warmup_epochs, 1e-8)
+            cos_progress = min(max((progress - warmup_epochs) / span, 0.0), 1.0)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * cos_progress))
+            factors = [ratio + (1.0 - ratio) * cosine for ratio in self._eta_min_ratios]
+
+        for group, base, factor in zip(self.trainer.optimizers[0].param_groups, self._base_lrs, factors):
+            group["lr"] = base * factor
+        self.log("train/lr", self._base_lrs[0] * factors[0], on_step=True, on_epoch=False)
+
     def configure_optimizers(self) -> Dict[str, Any]:
-        """Choose what optimizers and learning-rate schedulers to use in your optimization.
-        Normally you'd need one. But in the case of GANs or similar you might have multiple.
+        """Configure the optimizer.
 
-        Examples:
-            https://lightning.ai/docs/pytorch/latest/common/lightning_module.html#configure-optimizers
+        The learning-rate schedule is deliberately *not* returned as a Lightning scheduler; it is
+        applied per step in `on_train_batch_start`, driven by fractional-epoch progress. That yields
+        a smooth within-epoch warmup (like a step-based schedule) while staying anchored to epochs,
+        so it remains correct under dynamic data pruning, which changes the number of steps per
+        epoch. The `warmup_scheduler` / `main_scheduler` configs are reused only for their shape
+        parameters (`start_factor`, `eta_min`).
 
-        :return: A dict containing the configured optimizers and learning-rate schedulers to be used for training.
+        :return: A dict containing the configured optimizer.
         """
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
-        main_scheduler = self.hparams.main_scheduler(optimizer=optimizer)
-        if self.hparams.warmup_epochs > 0:
-            warmup_scheduler = self.hparams.warmup_scheduler(optimizer=optimizer)
-            scheduler = torch.optim.lr_scheduler.SequentialLR(
-                optimizer,
-                schedulers=[warmup_scheduler, main_scheduler],
-                milestones=[self.hparams.warmup_epochs],
-            )
-        else:
-            scheduler = main_scheduler
-        # Step the LR schedule once per epoch. Anchoring warmup + cosine to epochs (fixed at
-        # max_epochs) rather than to a step count keeps the schedule correct under dynamic data
-        # pruning, which changes the number of steps per epoch: the cosine still anneals to eta_min
-        # exactly at the final epoch instead of stopping early.
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-            },
-        }
+        # Peak LR per param group (the schedule scales these) and the schedule's shape parameters.
+        self._base_lrs = [group["lr"] for group in optimizer.param_groups]
+        warmup = self.hparams.warmup_scheduler
+        main = self.hparams.main_scheduler
+        self._warmup_start_factor = (
+            float(warmup.keywords.get("start_factor", 1.0)) if warmup is not None else 1.0
+        )
+        eta_min = float(main.keywords.get("eta_min", 0.0)) if main is not None else 0.0
+        self._eta_min_ratios = [eta_min / base if base else 0.0 for base in self._base_lrs]
+        return {"optimizer": optimizer}
 
 
 if __name__ == "__main__":
