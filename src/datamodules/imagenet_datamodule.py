@@ -1,10 +1,17 @@
+import math
 import os
+import tarfile
+from functools import partial
+from glob import glob
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
 import torchvision.transforms.v2 as T
+import webdataset
+import webdataset as wds
 from lightning import LightningDataModule
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.dataloader import default_collate
 from torchvision.datasets import ImageFolder
@@ -78,6 +85,8 @@ class ImageNetDataModule(LightningDataModule):
         train_dir: str = "train",
         val_dir: str = "val",
         test_dir: str = "test",
+        train_tar: Optional[str] = None,
+        val_tar: Optional[str] = None,
         eval_resize_size: int = 256,
         eval_crop_size: int = 224,
         train_crop_size: int = 224,
@@ -89,16 +98,13 @@ class ImageNetDataModule(LightningDataModule):
         cutmix_alpha: float = 0.0,
         mixup_alpha: float = 0.0,
         random_erase_prob: float = 0.0,
-        skip_resize_crop: bool = False,
-        phase2_train_dir: Optional[str] = None,
-        phase2_val_dir: Optional[str] = None,
-        switch_epoch: Optional[int] = None,
         batch_size: int = 64,
-        num_workers_train: int = 4,
-        num_workers_val: int = 4,
+        num_workers: int = 4,
         prefetch_factor: int = 2,
         pin_memory: bool = False,
-        persistent_workers: bool = False
+        wds=False,
+        wds_buffer_size=1000,
+        class_label_map: Optional[Dict[str, int]] = None,
     ) -> None:
         """Initialize an `ImageNetDataModule`.
 
@@ -106,6 +112,8 @@ class ImageNetDataModule(LightningDataModule):
         :param train_dir: The training data directory name. Defaults to `"train"`.
         :param val_dir: The validation data directory name. Defaults to `"val"`.
         :param test_dir: The test data directory name. Defaults to `"test"`.
+        :param train_tar: Path to a training webdataset tar file. Defaults to `None`.
+        :param val_tar: Path to a validation webdataset tar file. Defaults to `None`.
         :param eval_resize_size: The size to resize the shorter side of the image for evaluation. Defaults to `256`.
         :param eval_crop_size: The size to center crop the image for evaluation. Defaults to `224`.
         :param train_crop_size: The size to randomly crop the image for training. Defaults to `224`.
@@ -117,11 +125,6 @@ class ImageNetDataModule(LightningDataModule):
         :param cutmix_alpha: The alpha value for CutMix augmentation. Defaults to `0.0` (no CutMix).
         :param mixup_alpha: The alpha value for MixUp augmentation. Defaults to `0.0` (no MixUp).
         :param random_erase_prob: The probability of applying random erasing during training. Defaults to `0.0`.
-        :param skip_resize_crop: Skip resize and crop transforms. Use with datasets that were
-            preprocessed offline (e.g. via ``compress_imagenet.py``). Defaults to `False`.
-        :param phase2_train_dir: Training directory for phase 2 (JPEG-only). Defaults to `None`.
-        :param phase2_val_dir: Validation directory for phase 2 (JPEG-only). Defaults to `None`.
-        :param switch_epoch: Epoch (0-based) at which to switch to phase 2. Defaults to `None`.
         :param batch_size: The batch size. Defaults to `64`.
         :param num_workers: The number of workers. Defaults to `0`.
         :param prefetch_factor: The number of batches to prefetch. Defaults to `2`.
@@ -136,11 +139,6 @@ class ImageNetDataModule(LightningDataModule):
         self._interpolation_mode = T.InterpolationMode(interpolation)
         self._imagenet_mean = (0.485, 0.456, 0.406)
         self._imagenet_std = (0.229, 0.224, 0.225)
-        self._skip_resize_crop = skip_resize_crop
-        self.current_phase = 1
-
-        self.train_transforms = self._build_train_transforms(skip_resize_crop)
-        self.eval_transforms = self._build_eval_transforms(skip_resize_crop)
         self._train_crop_size = train_crop_size
         self.train_transforms = self._build_train_transforms(train_crop_size)
 
@@ -155,7 +153,72 @@ class ImageNetDataModule(LightningDataModule):
             ]
         )
 
-        if cutmix_alpha or mixup_alpha:
+        self.data_train: Optional[Dataset] = None
+        self.data_val: Optional[Dataset] = None
+        self.data_test: Optional[Dataset] = None
+
+        self.batch_size_per_device = batch_size
+        self.wds = wds
+        if self.wds:
+            # Expand globs so a shard pattern (e.g. train_jpeg50-*.tar) becomes the
+            # list of shards; fall back to the literal path for a single tar / remote url.
+            self.train_url = sorted(glob(train_tar)) or [train_tar] if train_tar else sorted(glob(f"{train_dir}/*.tar"))
+            self.val_url = sorted(glob(val_tar)) or [val_tar] if val_tar else sorted(glob(f"{val_dir}/*.tar"))
+            # If train and val share the same shards, check if keys have train/val prefix
+            same_urls = self.train_url and self.val_url and self.train_url == self.val_url
+            self._split_by_key = False
+            if same_urls:
+                ds = webdataset.WebDataset([self.train_url[0]], shardshuffle=False)
+                try:
+                    first_key = next(iter(ds)).get("__key__", "")
+                except StopIteration:
+                    first_key = ""
+                if first_key.startswith(("train/", "val/")):
+                    self._split_by_key = True
+                    self.val_url = self.train_url  # shared shards, filtered by prefix
+        self.buffer_size = wds_buffer_size
+        self._wds_train_count = None
+        self._wds_val_count = None
+
+        # Build class_label_map automatically from the train directory if not provided
+        if class_label_map is not None:
+            self.class_label_map = class_label_map
+        elif self.wds:
+            train_path = os.path.join(data_path, train_dir)
+            if Path(train_path).exists() and any(Path(train_path).iterdir()):
+                class_dirs = sorted(
+                    [d.name for d in Path(train_path).iterdir() if d.is_dir()]
+                )
+                self.class_label_map = {c: i for i, c in enumerate(class_dirs)}
+            else:
+                # Fallback: extract class names from webdataset keys
+                class_names = set()
+                for url in self.train_url[:3]:  # sample a few shards
+                    ds = webdataset.WebDataset([url], shardshuffle=False)
+                    for sample in ds:
+                        key = sample.get("__key__", "")
+                        cls = Path(key).parent.name
+                        if cls:
+                            class_names.add(cls)
+                        if len(class_names) >= 1000:
+                            break
+                    if len(class_names) >= 1000:
+                        break
+                if not class_names:
+                    raise FileNotFoundError(
+                        f"Could not determine class names from train_dir ({train_path}) "
+                        f"or webdataset shards ({self.train_url})."
+                    )
+                self.class_label_map = {c: i for i, c in enumerate(sorted(class_names))}
+        else:
+            self.class_label_map = None
+
+        # Set up the collate function.
+        # For webdataset the pipeline already yields batched (image, label) tuples,
+        # so the DataLoader collate is a simple pass-through.
+        if self.wds:
+            self.collate_fn = lambda x: x
+        elif cutmix_alpha or mixup_alpha:
             mixup_cutmix = self._get_mixup_cutmix(
                 mixup_alpha=mixup_alpha,
                 cutmix_alpha=cutmix_alpha,
@@ -164,34 +227,12 @@ class ImageNetDataModule(LightningDataModule):
         else:
             self.collate_fn = default_collate
 
-        self.data_train: Optional[Dataset] = None
-        self.data_val: Optional[Dataset] = None
-        self.data_test: Optional[Dataset] = None
-
-        self.batch_size_per_device = batch_size
-        self._prefetch_factor = prefetch_factor
-
-    def _make_dataloader(self, dataset: Dataset, shuffle: bool, num_workers) -> DataLoader[Any]:
-        return DataLoader(
-            dataset=dataset,
-            batch_size=self.batch_size_per_device,
-            num_workers=num_workers,
-            pin_memory=self.hparams.pin_memory,
-            prefetch_factor=self._prefetch_factor if num_workers > 0 else None,
-            collate_fn=self.collate_fn,
-            shuffle=shuffle,
-            persistent_workers=self.hparams.persistent_workers
-        )
-
-    def _build_train_transforms(self, skip_resize_crop: bool) -> T.Compose:
-        train_transforms = []
-        if not skip_resize_crop:
-            train_transforms.append(
-                T.RandomResizedCrop(
-                    self.hparams.train_crop_size,
-                    interpolation=self._interpolation_mode,
-                )
-            )
+    def _build_train_transforms(self, train_crop_size: int) -> T.Compose:
+        train_transforms = [
+            T.RandomResizedCrop(
+                train_crop_size, interpolation=self._interpolation_mode
+            ),
+        ]
         if self.hparams.hflip_prob > 0:
             train_transforms.append(T.RandomHorizontalFlip(self.hparams.hflip_prob))
 
@@ -235,107 +276,6 @@ class ImageNetDataModule(LightningDataModule):
         train_transforms.append(T.ToPureTensor())
         return T.Compose(train_transforms)
 
-    def _build_eval_transforms(self, skip_resize_crop: bool) -> T.Compose:
-        eval_transforms = []
-        if not skip_resize_crop:
-            eval_transforms.extend(
-                [
-                    T.Resize(self.hparams.eval_resize_size, interpolation=self._interpolation_mode),
-                    T.CenterCrop(self.hparams.eval_crop_size),
-                ]
-            )
-        eval_transforms.extend(
-            [
-                T.PILToTensor(),
-                T.ToDtype(torch.float, scale=True),
-                T.Normalize(mean=self._imagenet_mean, std=self._imagenet_std),
-                T.ToPureTensor(),
-            ]
-        )
-        return T.Compose(eval_transforms)
-
-    def _release_phase_1_resources(self) -> None:
-        """Drop phase-1 datasets and transforms after dataloaders no longer reference them."""
-        self.data_train = None
-        self.data_val = None
-        self.train_transforms = None
-        self.eval_transforms = None
-
-    def switch_to_phase_2(self) -> None:
-        """Switch to JPEG-only datasets with online resize/crop transforms."""
-        if self.hparams.phase2_train_dir is None or self.hparams.phase2_val_dir is None:
-            raise RuntimeError("phase2_train_dir and phase2_val_dir must be set to switch phases.")
-        if self.current_phase >= 2:
-            return
-
-        self._release_phase_1_resources()
-
-        self.hparams.train_dir = self.hparams.phase2_train_dir
-        self.hparams.val_dir = self.hparams.phase2_val_dir
-        self._skip_resize_crop = False
-        self.current_phase = 2
-
-        self.train_transforms = self._build_train_transforms(skip_resize_crop=False)
-        self.eval_transforms = self._build_eval_transforms(skip_resize_crop=False)
-
-        train_path = os.path.join(self.hparams.data_path, self.hparams.train_dir)
-        val_path = os.path.join(self.hparams.data_path, self.hparams.val_dir)
-        self.data_train = ImageFolder(train_path, transform=self.train_transforms)
-        self.data_val = ImageFolder(val_path, transform=self.eval_transforms)
-
-    def maybe_switch_for_epoch(self, epoch: int) -> bool:
-        """Switch to phase 2 when ``epoch >= switch_epoch``. Returns True if switched."""
-        switch_epoch = self.hparams.get("switch_epoch")
-        if switch_epoch is None or epoch < switch_epoch or self.current_phase >= 2:
-            return False
-        self.switch_to_phase_2()
-        return True
-
-    def _build_train_transforms(self, train_crop_size: int) -> T.Compose:
-        train_transforms = [
-            T.RandomResizedCrop(train_crop_size, interpolation=self._interpolation_mode),
-        ]
-        if self.hparams.hflip_prob > 0:
-            train_transforms.append(T.RandomHorizontalFlip(self.hparams.hflip_prob))
-
-        auto_augment_policy = self.hparams.auto_augment_policy
-        if auto_augment_policy is not None:
-            if auto_augment_policy == "ra":
-                train_transforms.append(
-                    T.RandAugment(
-                        interpolation=self._interpolation_mode,
-                        magnitude=self.hparams.ra_magnitude,
-                    )
-                )
-            elif auto_augment_policy == "ta_wide":
-                train_transforms.append(
-                    T.TrivialAugmentWide(interpolation=self._interpolation_mode)
-                )
-            elif auto_augment_policy == "augmix":
-                train_transforms.append(
-                    T.AugMix(
-                        interpolation=self._interpolation_mode,
-                        severity=self.hparams.augmix_severity,
-                    )
-                )
-            else:
-                aa_policy = T.AutoAugmentPolicy(auto_augment_policy)
-                train_transforms.append(
-                    T.AutoAugment(policy=aa_policy, interpolation=self._interpolation_mode)
-                )
-
-        train_transforms.extend(
-            [
-                T.PILToTensor(),
-                T.ToDtype(torch.float, scale=True),
-                T.Normalize(mean=self._imagenet_mean, std=self._imagenet_std),
-            ]
-        )
-        if self.hparams.random_erase_prob > 0:
-            train_transforms.append(T.RandomErasing(p=self.hparams.random_erase_prob))
-        train_transforms.append(T.ToPureTensor())
-        return T.Compose(train_transforms)
-
     def set_train_crop_size(self, crop_size: int) -> None:
         """Update training crop size and swap transforms on the train dataset."""
         self._train_crop_size = crop_size
@@ -365,6 +305,57 @@ class ImageNetDataModule(LightningDataModule):
         """
         pass
 
+    def _count_wds_samples(self, urls, prefix=None):
+        """Count total samples across webdataset shards (fast: samples one shard, extrapolates).
+
+        If *prefix* is given (e.g. ``"train/"``), only counts entries whose tar name
+        starts with that prefix.
+        """
+        count_per_shard = 0
+        with tarfile.open(urls[0], 'r|*') as tar:
+            for member in tar:
+                if member.name.endswith(('.jpeg', '.jpg', '.JPEG', '.JPG')):
+                    if prefix is None or member.name.startswith(prefix):
+                        count_per_shard += 1
+        return count_per_shard * len(urls)
+
+    def _batches_per_epoch(self, train: bool) -> int:
+        """Number of batches in one epoch, derived from the ImageFolder counts.
+
+        Used both to bound the (length-less) webdataset train epoch and to give the
+        WebLoaders a nominal ``__len__`` so Lightning's progress bar shows a total.
+        """
+        if self.wds:
+            count = self._wds_train_count if train else self._wds_val_count
+            return math.ceil(count / self.batch_size_per_device)
+        data = self.data_train if train else self.data_val
+        return math.ceil(len(data) / self.batch_size_per_device)
+
+    def make_dataset(self, train: bool = False) -> Dataset:
+        """Build a webdataset pipeline that decodes, transforms, and batches samples.
+
+        Uses ``.decode("pil")`` to get PIL Images directly, then applies the
+        train or eval transform.  Shuffling is only applied for the training split.
+        """
+        urls = self.train_url if train else self.val_url
+        prefix = "train/" if train else "val/"
+        dataset = wds.WebDataset(urls, shardshuffle=len(urls) if train else False)
+        if self._split_by_key:
+            dataset = dataset.select(lambda s: s.get("__key__", "").startswith(prefix))
+        if train:
+            dataset = dataset.shuffle(self.buffer_size)
+        dataset = dataset.decode("pil")
+        dataset = dataset.map(partial(self.wds_transform, train=train))
+        # Val keeps the last partial batch so every sample is evaluated; train drops it.
+        dataset = dataset.batched(self.batch_size_per_device, partial=not train)
+        return dataset
+
+    def wds_transform(self, sample, train: bool = False):
+        img = sample["jpeg"].convert("RGB")
+        class_name = Path(sample["__key__"]).parent.name
+        label = torch.tensor(self.class_label_map[class_name], dtype=torch.long)
+        return self.train_transforms(img) if train else self.eval_transforms(img), label
+
     def setup(self, stage: Optional[str] = None) -> None:
         """Load data. Set variables: `self.data_train`, `self.data_val`, `self.data_test`.
 
@@ -382,39 +373,121 @@ class ImageNetDataModule(LightningDataModule):
                     transform=self.eval_transforms,
                 )
         if stage in ("fit", "validate") or stage is None:
-            if not self.data_train:
-                self.data_train = ImageFolder(
-                    os.path.join(self.hparams.data_path, self.hparams.train_dir),
-                    transform=self.train_transforms,
-                )
-
-            if not self.data_val:
-                self.data_val = ImageFolder(
-                    os.path.join(self.hparams.data_path, self.hparams.val_dir),
-                    transform=self.eval_transforms,
-                )
+            if self.wds:
+                if self._wds_train_count is None:
+                    self._wds_train_count = self._count_wds_samples(
+                        self.train_url,
+                        prefix="train/" if self._split_by_key else None,
+                    )
+                    self._wds_val_count = self._count_wds_samples(
+                        self.val_url,
+                        prefix="val/" if self._split_by_key else None,
+                    )
+            else:
+                if not self.data_train:
+                    self.data_train = ImageFolder(
+                        os.path.join(self.hparams.data_path, self.hparams.train_dir),
+                        transform=self.train_transforms,
+                    )
+                if not self.data_val:
+                    self.data_val = ImageFolder(
+                        os.path.join(self.hparams.data_path, self.hparams.val_dir),
+                        transform=self.eval_transforms,
+                    )
 
     def train_dataloader(self) -> DataLoader[Any]:
         """Create and return the train dataloader.
 
         :return: The train dataloader.
         """
-        return self._make_dataloader(self.data_train, shuffle=True, num_workers=self.hparams.num_workers_train)
+
+        if self.wds:
+            dataset = self.make_dataset(train=True)
+            nbatches = self._batches_per_epoch(train=True)
+            # Keep workers alive across epochs (avoids respawn + shuffle-buffer refill
+            # stalls at every epoch boundary) and deepen the prefetch queue so the GPU
+            # doesn't drain it mid-epoch. Both are only valid with num_workers > 0.
+            worker_kwargs = (
+                {
+                    "prefetch_factor": self.hparams.prefetch_factor,
+                    "persistent_workers": True,
+                }
+                if self.hparams.num_workers > 0
+                else {}
+            )
+            loader = wds.WebLoader(
+                dataset,
+                batch_size=None,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collate_fn,
+                **worker_kwargs,
+            )
+            # Bound the stream to one nominal pass across all workers so the epoch
+            # ends, validation fires, and the LR schedule aligns with the T_max
+            # computed in train.py. For shard-splitting this truncates/repeats only
+            # by the few batches lost to per-worker partial drops. with_length feeds
+            # the progress bar.
+            return loader.with_epoch(nbatches).with_length(nbatches)
+        return DataLoader(
+            dataset=self.data_train,
+            batch_size=self.batch_size_per_device,
+            num_workers=self.hparams.num_workers,
+            pin_memory=self.hparams.pin_memory,
+            prefetch_factor=self.hparams.prefetch_factor,
+            collate_fn=self.collate_fn,
+            shuffle=True,
+        )
 
     def val_dataloader(self) -> DataLoader[Any]:
         """Create and return the validation dataloader.
 
         :return: The validation dataloader.
         """
-        return self._make_dataloader(self.data_val, shuffle=False, num_workers=self.hparams.num_workers_val)
+        if self.wds:
+            dataset = self.make_dataset(train=False)
+            # Val is small — keep few workers, no persistence, to avoid OOM from
+            # 32 buffered prefetch queues (train + val workers alive simultaneously)
+            val_workers = min(self.hparams.num_workers, 4)
+            loader = wds.WebLoader(
+                dataset,
+                batch_size=None,
+                num_workers=val_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collate_fn,
+            )
+            return loader.with_length(self._batches_per_epoch(train=False))
+        return DataLoader(
+            dataset=self.data_val,
+            batch_size=self.batch_size_per_device,
+            num_workers=self.hparams.num_workers,
+            pin_memory=self.hparams.pin_memory,
+            prefetch_factor=self.hparams.prefetch_factor,
+            shuffle=False,
+        )
 
     def test_dataloader(self) -> DataLoader[Any]:
         """Create and return the test dataloader.
 
         :return: The test dataloader.
         """
-        num_workers = self.hparams.num_workers_test if self.hparams.num_workers_test is not None else self.hparams.num_workers_val
-        return self._make_dataloader(self.data_test, shuffle=False, num_workers=num_workers)
+        if self.wds:
+            dataset = self.make_dataset(train=False)
+            return wds.WebLoader(
+                dataset,
+                batch_size=None,
+                num_workers=0,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collate_fn,
+            )
+        return DataLoader(
+            dataset=self.data_test,
+            batch_size=self.batch_size_per_device,
+            num_workers=self.hparams.num_workers,
+            pin_memory=self.hparams.pin_memory,
+            prefetch_factor=self.hparams.prefetch_factor,
+            shuffle=False,
+        )
 
     def predict_dataloader(self) -> DataLoader[Any]:
         """Create and return the predict dataloader.
@@ -450,9 +523,13 @@ class ImageNetDataModule(LightningDataModule):
     def _get_mixup_cutmix(self, mixup_alpha, cutmix_alpha):
         mixup_cutmix = []
         if mixup_alpha > 0:
-            mixup_cutmix.append(T.MixUp(alpha=mixup_alpha, num_classes=self.num_classes))
+            mixup_cutmix.append(
+                T.MixUp(alpha=mixup_alpha, num_classes=self.num_classes)
+            )
         if cutmix_alpha > 0:
-            mixup_cutmix.append(T.CutMix(alpha=cutmix_alpha, num_classes=self.num_classes))
+            mixup_cutmix.append(
+                T.CutMix(alpha=cutmix_alpha, num_classes=self.num_classes)
+            )
         if not mixup_cutmix:
             return None
 
