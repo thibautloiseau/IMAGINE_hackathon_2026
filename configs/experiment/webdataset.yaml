@@ -1,0 +1,14 @@
+# @package _global_
+
+# to execute this experiment run:
+# uv run src/train.py experiment=webdataset
+
+defaults:
+  - override /datamodule: webdataset
+  - override /trainer: imagenet_vit_s_16
+  - override /callbacks: default
+
+seed: 42
+
+experiment_name: "webdataset_test"
+tags: ["data", "train", "webdataset"]
