@@ -1,0 +1,22 @@
+# @package _global_
+
+# WebDataset dataloader with two-phase JPEG compression.
+# uv run src/train.py experiment=webdataset_compressed
+
+defaults:
+  - override /datamodule: webdataset
+  - override /trainer: imagenet_vit_s_16
+  - override /logger: wandb
+
+seed: 42
+
+experiment_name: "webdataset_compressed"
+tags: ["benchmark", "webdataset", "compressed"]
+
+data:
+  enable: true
+  webdataset: true
+
+logger:
+  wandb:
+    offline: True

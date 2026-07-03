@@ -105,6 +105,12 @@ class ImageNetDataModule(LightningDataModule):
         wds=False,
         wds_buffer_size=1000,
         class_label_map: Optional[Dict[str, int]] = None,
+        skip_resize_crop: bool = False,
+        phase2_train_dir: Optional[str] = None,
+        phase2_val_dir: Optional[str] = None,
+        phase2_train_tar: Optional[str] = None,
+        phase2_val_tar: Optional[str] = None,
+        switch_epoch: Optional[int] = None,
     ) -> None:
         """Initialize an `ImageNetDataModule`.
 
@@ -129,6 +135,13 @@ class ImageNetDataModule(LightningDataModule):
         :param num_workers: The number of workers. Defaults to `0`.
         :param prefetch_factor: The number of batches to prefetch. Defaults to `2`.
         :param pin_memory: Whether to pin memory. Defaults to `False`.
+        :param skip_resize_crop: Skip resize and crop transforms. Use with preprocessed
+            datasets (e.g. via ``compress_imagenet``). Defaults to `False`.
+        :param phase2_train_dir: Training directory for phase 2 (JPEG-only). Defaults to `None`.
+        :param phase2_val_dir: Validation directory for phase 2 (JPEG-only). Defaults to `None`.
+        :param phase2_train_tar: WebDataset tar pattern for phase 2 training. Defaults to `None`.
+        :param phase2_val_tar: WebDataset tar pattern for phase 2 validation. Defaults to `None`.
+        :param switch_epoch: Epoch (0-based) at which to switch to phase 2. Defaults to `None`.
         """
         super().__init__()
 
@@ -140,17 +153,15 @@ class ImageNetDataModule(LightningDataModule):
         self._imagenet_mean = (0.485, 0.456, 0.406)
         self._imagenet_std = (0.229, 0.224, 0.225)
         self._train_crop_size = train_crop_size
-        self.train_transforms = self._build_train_transforms(train_crop_size)
+        self._skip_resize_crop = skip_resize_crop
+        self.current_phase = 1
+        self._num_workers = num_workers
 
-        self.eval_transforms = T.Compose(
-            [
-                T.Resize(eval_resize_size, interpolation=self._interpolation_mode),
-                T.CenterCrop(eval_crop_size),
-                T.PILToTensor(),
-                T.ToDtype(torch.float, scale=True),
-                T.Normalize(mean=self._imagenet_mean, std=self._imagenet_std),
-                T.ToPureTensor(),
-            ]
+        self.train_transforms = self._build_train_transforms(
+            train_crop_size, skip_resize_crop
+        )
+        self.eval_transforms = self._build_eval_transforms(
+            eval_resize_size, eval_crop_size, skip_resize_crop
         )
 
         self.data_train: Optional[Dataset] = None
@@ -227,12 +238,16 @@ class ImageNetDataModule(LightningDataModule):
         else:
             self.collate_fn = default_collate
 
-    def _build_train_transforms(self, train_crop_size: int) -> T.Compose:
-        train_transforms = [
-            T.RandomResizedCrop(
-                train_crop_size, interpolation=self._interpolation_mode
-            ),
-        ]
+    def _build_train_transforms(
+        self, train_crop_size: int, skip_resize_crop: bool = False
+    ) -> T.Compose:
+        train_transforms = []
+        if not skip_resize_crop:
+            train_transforms.append(
+                T.RandomResizedCrop(
+                    train_crop_size, interpolation=self._interpolation_mode
+                )
+            )
         if self.hparams.hflip_prob > 0:
             train_transforms.append(T.RandomHorizontalFlip(self.hparams.hflip_prob))
 
@@ -276,16 +291,91 @@ class ImageNetDataModule(LightningDataModule):
         train_transforms.append(T.ToPureTensor())
         return T.Compose(train_transforms)
 
+    def _build_eval_transforms(
+        self,
+        eval_resize_size: int,
+        eval_crop_size: int,
+        skip_resize_crop: bool = False,
+    ) -> T.Compose:
+        eval_transforms = []
+        if not skip_resize_crop:
+            eval_transforms.extend(
+                [
+                    T.Resize(eval_resize_size, interpolation=self._interpolation_mode),
+                    T.CenterCrop(eval_crop_size),
+                ]
+            )
+        eval_transforms.extend(
+            [
+                T.PILToTensor(),
+                T.ToDtype(torch.float, scale=True),
+                T.Normalize(mean=self._imagenet_mean, std=self._imagenet_std),
+                T.ToPureTensor(),
+            ]
+        )
+        return T.Compose(eval_transforms)
+
     def set_train_crop_size(self, crop_size: int) -> None:
         """Update training crop size and swap transforms on the train dataset."""
         self._train_crop_size = crop_size
-        self.train_transforms = self._build_train_transforms(crop_size)
+        self.train_transforms = self._build_train_transforms(
+            crop_size, self._skip_resize_crop
+        )
         if self.data_train is not None:
             self.data_train.transform = self.train_transforms
 
     def set_batch_size(self, batch_size: int) -> None:
         """Update per-device training batch size."""
         self.batch_size_per_device = batch_size
+
+    def switch_to_phase_2(self) -> None:
+        """Switch to JPEG-only datasets with online resize/crop transforms."""
+        if self.current_phase >= 2:
+            return
+
+        if self.wds:
+            if self.hparams.phase2_train_tar is None:
+                raise RuntimeError(
+                    "phase2_train_tar must be set for webdataset phase switching."
+                )
+            self.hparams.train_tar = self.hparams.phase2_train_tar
+            if self.hparams.phase2_val_tar is not None:
+                self.hparams.val_tar = self.hparams.phase2_val_tar
+            self.train_url = (
+                sorted(glob(self.hparams.train_tar)) or [self.hparams.train_tar]
+            )
+            self.val_url = (
+                sorted(glob(self.hparams.val_tar)) or [self.hparams.val_tar]
+                if self.hparams.val_tar
+                else self.val_url
+            )
+        else:
+            if self.hparams.phase2_train_dir is None:
+                raise RuntimeError(
+                    "phase2_train_dir must be set for ImageFolder phase switching."
+                )
+            self.hparams.train_dir = self.hparams.phase2_train_dir
+            self.hparams.val_dir = self.hparams.phase2_val_dir
+
+            self.data_train = None
+            self.data_val = None
+            train_path = os.path.join(self.hparams.data_path, self.hparams.train_dir)
+            val_path = os.path.join(self.hparams.data_path, self.hparams.val_dir)
+            self.data_train = ImageFolder(
+                train_path, transform=self.train_transforms
+            )
+            self.data_val = ImageFolder(val_path, transform=self.eval_transforms)
+
+        self._skip_resize_crop = False
+        self.current_phase = 2
+        self.train_transforms = self._build_train_transforms(
+            self._train_crop_size, skip_resize_crop=False
+        )
+        self.eval_transforms = self._build_eval_transforms(
+            self.hparams.eval_resize_size,
+            self.hparams.eval_crop_size,
+            skip_resize_crop=False,
+        )
 
     @property
     def num_classes(self) -> int:

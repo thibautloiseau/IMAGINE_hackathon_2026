@@ -1,10 +1,10 @@
 _target_: src.datamodules.imagenet_datamodule.ImageNetDataModule
 data_path: ${paths.data_dir}
-train_dir: ???
-val_dir: ???
-test_dir: ???
+train_dir: 'train'
+val_dir: 'val'
+test_dir: 'test'
 batch_size: 512 # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
-num_workers: 16
+num_workers: 12
 prefetch_factor: 3
 pin_memory: True
 eval_resize_size: 256
@@ -16,3 +16,5 @@ auto_augment_policy: 'ra'
 ra_magnitude: 10
 cutmix_alpha: 0.0
 mixup_alpha: 0.2
+wds: False
+wds_buffer_size: 1000

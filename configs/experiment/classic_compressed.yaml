@@ -1,0 +1,21 @@
+# @package _global_
+
+# Classic ImageFolder dataloader with two-phase JPEG compression.
+# uv run src/train.py experiment=classic_compressed
+
+defaults:
+  - override /datamodule: datateam
+  - override /trainer: imagenet_vit_s_16
+  - override /logger: wandb
+
+seed: 42
+
+experiment_name: "classic_compressed"
+tags: ["benchmark", "classic", "compressed"]
+
+data:
+  enable: true
+
+logger:
+  wandb:
+    offline: True

@@ -1,0 +1,18 @@
+# @package _global_
+
+# Classic ImageFolder dataloader, no compression.
+# uv run src/train.py experiment=classic
+
+defaults:
+  - override /datamodule: datateam
+  - override /trainer: imagenet_vit_s_16
+  - override /logger: wandb
+
+seed: 42
+
+experiment_name: "classic_baseline"
+tags: ["benchmark", "classic"]
+
+logger:
+  wandb:
+    offline: True

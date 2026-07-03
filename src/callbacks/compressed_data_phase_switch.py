@@ -65,14 +65,11 @@ class CompressedDataPhaseSwitchCallback(Callback):
 
     def _switch_to_phase_2(self, trainer: Trainer, completed_epoch: int) -> None:
         datamodule = trainer.datamodule
-        if datamodule is None or getattr(datamodule.hparams, "phase2_train_dir", None) is None:
-            return
-        if datamodule.current_phase >= 2:
+        if datamodule is None or datamodule.current_phase >= 2:
             return
 
         old_train = datamodule.hparams.train_dir
         old_val = datamodule.hparams.val_dir
-        old_workers = datamodule.hparams.num_workers_train
 
         _invalidate_dataloaders(trainer)
         datamodule.switch_to_phase_2()
@@ -81,7 +78,6 @@ class CompressedDataPhaseSwitchCallback(Callback):
             old_train,
             old_val,
             datamodule,
-            old_workers,
         )
 
     def on_fit_start(self, trainer: Trainer, pl_module) -> None:
@@ -99,13 +95,11 @@ class CompressedDataPhaseSwitchCallback(Callback):
         old_train: str,
         old_val: str,
         datamodule,
-        old_workers: int,
     ) -> None:
         msg = (
             f"Switching to phase 2 (JPEG-only) after epoch {completed_epoch}: "
             f"train {old_train} -> {datamodule.hparams.train_dir}, "
-            f"val {old_val} -> {datamodule.hparams.val_dir}, "
-            f"num_workers {old_workers} -> {datamodule.hparams.num_workers_train} "
+            f"val {old_val} -> {datamodule.hparams.val_dir} "
             f"(online resize/crop enabled from epoch {completed_epoch + 1})"
         )
         log.info(msg)

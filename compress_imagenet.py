@@ -11,16 +11,21 @@ With ``--also-jpeg-only``, each source image is read once and two outputs are
 written: the resized/cropped dataset above and a recompression of the
 original resolution in the same format, e.g. ``data/train_q75/``.
 
+With ``--webdataset``, each output directory is also converted into globally-
+shuffled webdataset tar shards (e.g. ``data/train_rs256_cc224_q75_shards/``).
+
 Example:
     uv run compress_imagenet.py --resize-size 256 --crop-size 224 --jpeg-quality 75
     uv run compress_imagenet.py --resize-size 128 --crop-size 96 --jpeg-quality 50 --also-jpeg-only
     uv run compress_imagenet.py --resize-size 128 --crop-size 96 --no-jpeg
+    uv run compress_imagenet.py --resize-size 124 --crop-size 112 --webdataset
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +36,11 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, T
 from torchvision.datasets.folder import IMG_EXTENSIONS
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as F
+
+try:
+    import webdataset as wds
+except ImportError:
+    wds = None  # webdataset shard creation requires: pip install webdataset
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -102,17 +112,33 @@ def compressed_datasets_exist(
     splits: tuple[str, ...] = ("train", "val"),
     output_suffix: str | None = None,
     no_jpeg: bool = False,
+    check_webdataset: bool = False,
 ) -> bool:
-    """Return True if all resized+compressed and JPEG-only split dirs exist with images."""
+    """Return True if all resized+compressed and JPEG-only split dirs (or shards) exist."""
     data_dir = data_dir.resolve()
     for split in splits:
-        resized = data_dir / resized_dir_name(
+        resized_name = resized_dir_name(
             split, resize_size, crop_size, jpeg_quality, output_suffix, no_jpeg=no_jpeg
         )
-        jpeg_only = data_dir / jpeg_only_dir_name(split, jpeg_quality, output_suffix, no_jpeg=no_jpeg)
-        if not _split_has_images(resized) or not _split_has_images(jpeg_only):
-            return False
+        jpeg_name = jpeg_only_dir_name(split, jpeg_quality, output_suffix, no_jpeg=no_jpeg)
+
+        if check_webdataset:
+            # Check for webdataset shard directories with tar files
+            resized_shard_dir = data_dir / _shard_dir_name(resized_name)
+            jpeg_shard_dir = data_dir / _shard_dir_name(jpeg_name)
+            if not _shard_dir_has_tars(resized_shard_dir) or not _shard_dir_has_tars(jpeg_shard_dir):
+                return False
+        else:
+            resized = data_dir / resized_name
+            jpeg_only = data_dir / jpeg_name
+            if not _split_has_images(resized) or not _split_has_images(jpeg_only):
+                return False
     return True
+
+
+def _shard_dir_has_tars(shard_dir: Path) -> bool:
+    """Return True if the shard directory exists and contains at least one .tar file."""
+    return shard_dir.is_dir() and any(shard_dir.glob("*.tar"))
 
 
 def _collect_tasks(
@@ -159,6 +185,54 @@ def _needs_processing(dst: Path, overwrite: bool) -> bool:
     return overwrite or not dst.exists()
 
 
+def _shard_dir_name(dir_name: str) -> str:
+    """Return the shard directory name for a given output directory."""
+    return f"{dir_name}_shards"
+
+
+def _create_webdataset_shards(
+    src_dir: Path,
+    data_dir: Path,
+    dir_name: str,
+    maxcount: int,
+    seed: int,
+    console: Console,
+) -> None:
+    """Create webdataset tar shards from a directory of processed images."""
+    if wds is None:
+        raise ImportError(
+            "webdataset is required for --webdataset. Install with: pip install webdataset"
+        )
+
+    image_paths = sorted(
+        p for p in src_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in {e.lower() for e in IMG_EXTENSIONS}
+    )
+    if not image_paths:
+        console.print(f"[yellow]No images found in {src_dir}[/yellow]")
+        return
+
+    # Shuffle globally for proper shardshuffle training
+    random.Random(seed).shuffle(image_paths)
+
+    shard_dir = data_dir / _shard_dir_name(dir_name)
+    shard_pattern = str(shard_dir / f"{dir_name}-%06d.tar")
+    shard_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"  Creating webdataset shards from {len(image_paths):,} images...")
+    with wds.ShardWriter(shard_pattern, maxcount=maxcount) as sink:
+        for i, img_path in enumerate(image_paths):
+            rel_path = img_path.relative_to(src_dir)
+            # Key: class_name/stem (e.g., n03026506/n03026506_1316)
+            key = str(rel_path.with_suffix(""))
+            with open(img_path, "rb") as f:
+                data = f.read()
+            sink.write({"__key__": key, "jpeg": data})
+            if (i + 1) % 50000 == 0:
+                console.print(f"    {i + 1:,}/{len(image_paths):,}")
+    console.print(f"  Shards written to {shard_dir}/")
+
+
 def _save_image(img: Image.Image, dst: Path, jpeg_quality: int, no_jpeg: bool = False) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if no_jpeg:
@@ -203,8 +277,12 @@ def _process_split(
     num_workers: int,
     console: Console,
     no_jpeg: bool,
+    make_webdataset: bool,
+    shard_maxcount: int,
+    shard_seed: int,
+    source_dir: Path | None = None,
 ) -> None:
-    src_root = data_dir / split
+    src_root = (source_dir if source_dir is not None else data_dir) / split
     if not src_root.is_dir():
         raise FileNotFoundError(f"Split directory not found: {src_root}")
 
@@ -264,6 +342,24 @@ def _process_split(
         f"failed={counts['failed']:,}"
     )
 
+    # Create webdataset shards if requested
+    if make_webdataset:
+        resized_dir_name_val = resized_dir_name(
+            split, resize_size, crop_size, jpeg_quality, output_suffix, no_jpeg=no_jpeg
+        )
+        _create_webdataset_shards(
+            resized_root, data_dir, resized_dir_name_val,
+            shard_maxcount, shard_seed, console,
+        )
+        if jpeg_only_root is not None:
+            jpeg_only_dir_name_val = jpeg_only_dir_name(
+                split, jpeg_quality, output_suffix, no_jpeg=no_jpeg
+            )
+            _create_webdataset_shards(
+                jpeg_only_root, data_dir, jpeg_only_dir_name_val,
+                shard_maxcount, shard_seed, console,
+            )
+
 
 def compress_splits(
     data_dir: Path,
@@ -277,7 +373,11 @@ def compress_splits(
     output_suffix: str | None = None,
     num_workers: int | None = None,
     no_jpeg: bool = False,
+    make_webdataset: bool = False,
+    shard_maxcount: int = 10000,
+    shard_seed: int = 42,
     console: Console | None = None,
+    source_dir: Path | None = None,
 ) -> None:
     """Resize, crop, and compress dataset splits (optionally uncompressed copies too)."""
     if resize_size <= 0:
@@ -303,6 +403,7 @@ def compress_splits(
         f"Resize={resize_size}, crop={crop_size}, "
         f"interpolation={interpolation}, {quality_info}, "
         f"also_jpeg_only={also_jpeg_only}, "
+        f"webdataset={make_webdataset}, "
         f"workers={workers}, overwrite={overwrite}"
     )
 
@@ -320,6 +421,10 @@ def compress_splits(
             num_workers=workers,
             console=console,
             no_jpeg=no_jpeg,
+            make_webdataset=make_webdataset,
+            shard_maxcount=shard_maxcount,
+            shard_seed=shard_seed,
+            source_dir=source_dir,
         )
 
 
@@ -369,6 +474,23 @@ def parse_args() -> argparse.Namespace:
         help="Save images as lossless PNG instead of JPEG. Disables JPEG compression.",
     )
     parser.add_argument(
+        "--webdataset",
+        action="store_true",
+        help="Also create globally-shuffled webdataset tar shards from the output directories.",
+    )
+    parser.add_argument(
+        "--shard-maxcount",
+        type=int,
+        default=10000,
+        help="Max samples per webdataset shard (default: 10000).",
+    )
+    parser.add_argument(
+        "--shard-seed",
+        type=int,
+        default=42,
+        help="Random seed for global shard shuffling (default: 42).",
+    )
+    parser.add_argument(
         "--also-jpeg-only",
         action="store_true",
         help=(
@@ -416,6 +538,9 @@ def main() -> None:
             output_suffix=args.output_suffix,
             num_workers=args.num_workers,
             no_jpeg=args.no_jpeg,
+            make_webdataset=args.webdataset,
+            shard_maxcount=args.shard_maxcount,
+            shard_seed=args.shard_seed,
             console=console,
         )
     except (ValueError, FileNotFoundError) as exc:

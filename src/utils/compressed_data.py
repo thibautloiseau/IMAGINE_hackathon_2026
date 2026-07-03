@@ -33,6 +33,7 @@ def apply_compressed_data_config(cfg: DictConfig) -> None:
     crop_size = data_cfg.crop_size
     jpeg_quality = data_cfg.jpeg_quality
     no_jpeg = data_cfg.get("no_jpeg", False)
+    use_wds = cfg.datamodule.get("wds", False)
 
     phase1_train = resized_dir_name("train", resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg)
     phase1_val = resized_dir_name("val", resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg)
@@ -40,10 +41,20 @@ def apply_compressed_data_config(cfg: DictConfig) -> None:
     phase2_val = jpeg_only_dir_name("val", jpeg_quality, no_jpeg=no_jpeg)
 
     with open_dict(cfg.datamodule):
-        cfg.datamodule.train_dir = phase1_train
-        cfg.datamodule.val_dir = phase1_val
-        cfg.datamodule.phase2_train_dir = phase2_train
-        cfg.datamodule.phase2_val_dir = phase2_val
+        if use_wds:
+            from compress_imagenet import _shard_dir_name
+
+            data_path = cfg.datamodule.data_path
+            cfg.datamodule.train_tar = f"{data_path}/{_shard_dir_name(phase1_train)}/{phase1_train}-*.tar"
+            cfg.datamodule.val_tar = f"{data_path}/{_shard_dir_name(phase1_val)}/{phase1_val}-*.tar"
+            cfg.datamodule.phase2_train_tar = f"{data_path}/{_shard_dir_name(phase2_train)}/{phase2_train}-*.tar"
+            cfg.datamodule.phase2_val_tar = f"{data_path}/{_shard_dir_name(phase2_val)}/{phase2_val}-*.tar"
+        else:
+            cfg.datamodule.train_dir = phase1_train
+            cfg.datamodule.val_dir = phase1_val
+            cfg.datamodule.phase2_train_dir = phase2_train
+            cfg.datamodule.phase2_val_dir = phase2_val
+
         cfg.datamodule.switch_epoch = data_cfg.switch_epoch
         cfg.datamodule.skip_resize_crop = data_cfg.get("skip_resize_crop", True)
         if data_cfg.get("disable_mixup_cutmix", False):
@@ -67,6 +78,9 @@ def prepare_compressed_datasets(cfg: DictConfig) -> None:
     jpeg_quality = data_cfg.jpeg_quality
     overwrite = data_cfg.get("overwrite", False)
     no_jpeg = data_cfg.get("no_jpeg", False)
+    make_webdataset = data_cfg.get("webdataset", False)
+    shard_maxcount = data_cfg.get("shard_maxcount", 10000)
+    shard_seed = data_cfg.get("shard_seed", 42)
 
     resized_train = resized_dir_name("train", resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg)
     resized_val = resized_dir_name("val", resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg)
@@ -83,7 +97,12 @@ def prepare_compressed_datasets(cfg: DictConfig) -> None:
     )
 
     if not overwrite and compressed_datasets_exist(
-        data_dir, resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg
+        data_dir,
+        resize_size,
+        crop_size,
+        jpeg_quality,
+        no_jpeg=no_jpeg,
+        check_webdataset=make_webdataset,
     ):
         log.info(
             f"All compressed datasets already exist under {data_dir} and overwrite=false; "
@@ -95,6 +114,21 @@ def prepare_compressed_datasets(cfg: DictConfig) -> None:
         )
         return
 
+    # Determine source directory (images to compress from).
+    # If the datamodule's data_path already contains the source split (e.g. data/train/),
+    # use it directly. Otherwise fall back to data/ for the source while keeping
+    # data_dir as the output destination (needed for webdataset where data_path
+    # points to tar shards, not the original ImageFolder).
+    source_train = data_dir / "train"
+    fallback_source = Path("data")
+    if source_train.is_dir():
+        source_dir = data_dir
+    elif (fallback_source / "train").is_dir():
+        source_dir = fallback_source
+        log.info(f"Source images not at {data_dir}, using {source_dir} instead.")
+    else:
+        source_dir = data_dir
+
     if overwrite:
         log.info("overwrite=true: reprocessing all compressed datasets.")
         print("[compressed_data] overwrite=true: running compression (reprocessing all images).")
@@ -104,12 +138,16 @@ def prepare_compressed_datasets(cfg: DictConfig) -> None:
 
     compress_splits(
         data_dir=data_dir,
+        source_dir=source_dir,
         resize_size=resize_size,
         crop_size=crop_size,
         jpeg_quality=jpeg_quality,
         also_jpeg_only=True,
         overwrite=overwrite,
         no_jpeg=no_jpeg,
+        make_webdataset=make_webdataset,
+        shard_maxcount=shard_maxcount,
+        shard_seed=shard_seed,
     )
 
     log.info("Compressed dataset preparation finished.")

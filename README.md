@@ -85,6 +85,38 @@ Then train with the webdataset experiment:
 uv run src/train.py experiment=webdataset
 ```
 
+#### Compressed Datasets (low-resolution / JPEG / PNG)
+The `compress_imagenet.py` script resizes, center-crops, and compresses images. The defaults match the two-phase training config (`configs/data/default.yaml`):
+
+```bash
+# Low-res JPEG compressed (124×112, quality 75) — matches config defaults
+uv run compress_imagenet.py --resize-size 124 --crop-size 112
+
+# Low-res lossless PNG
+uv run compress_imagenet.py --resize-size 124 --crop-size 112 --no-jpeg
+
+# Low-res JPEG + also create webdataset shards for fast dataloading
+uv run compress_imagenet.py --resize-size 124 --crop-size 112 --webdataset
+
+# PNG + webdataset shards
+uv run compress_imagenet.py --resize-size 124 --crop-size 112 --no-jpeg --webdataset
+
+# Full pipeline: resize, jpeg-only copies, and webdataset shards for both
+uv run compress_imagenet.py --resize-size 124 --crop-size 112 --also-jpeg-only --webdataset
+```
+
+Output directories follow the naming pattern `train_rs{resize}_cc{crop}_q{quality}/` (or `_png` with `--no-jpeg`). Webdataset shards are created alongside in `*_shards/` directories.
+
+To enable two-phase compressed training, set `data.enable: true` in your experiment config (see `configs/data/default.yaml`). To also use webdataset, override the datamodule to use the shard paths:
+```yaml
+# In your experiment config:
+  - override /datamodule: webdataset
+datamodule:
+  data_path: data
+  train_tar: data/train_rs124_cc112_q75_shards/train_rs124_cc112_q75-*.tar
+  val_tar: data/val_rs124_cc112_q75_shards/val_rs124_cc112_q75-*.tar
+```
+
 ### uv
 We are going to use the [uv package manager](https://docs.astral.sh/uv/). To install it, run:
 ```bash

@@ -4,10 +4,13 @@ enable: false
 
 # Phase 1: resized + center cropped + JPEG compressed (no Resize/Crop augmentations)
 # Phase 2: JPEG compressed only (with Resize/Crop augmentations)
-resize_size: 124
-crop_size: 112
-jpeg_quality: 75
+resize_size: 112
+crop_size: 96
+jpeg_quality: 50
 no_jpeg: false  # set to true to save lossless PNG instead of JPEG
+webdataset: false  # set to true to also create webdataset tar shards
+shard_maxcount: 10000  # max samples per webdataset shard
+shard_seed: 42  # random seed for webdataset shard shuffling
 overwrite: false # false = reuse existing compressed data; true = reprocess all images
 switch_epoch: 15 # switch to phase 2 at this epoch (0-based)
 disable_mixup_cutmix: false # disable CutMix and MixUp during compressed-data training
