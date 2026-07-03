@@ -75,11 +75,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     if "CosineAnnealingLR" in cfg.module["main_scheduler"]["_target_"]:
         datamodule.setup(stage="fit")  # Load training set
+        num_train = datamodule._wds_train_count if datamodule.wds else len(datamodule.data_train)
         callbacks_cfg = cfg.get("callbacks") or {}
         prog_cb = callbacks_cfg.get("progressive_resolution")
         if prog_cb and prog_cb.get("match_tokens"):
             total_steps = estimate_training_steps(
-                num_train_samples=len(datamodule.data_train),
+                num_train_samples=num_train,
                 max_epochs=cfg.trainer.max_epochs,
                 start_crop_size=cfg.datamodule.train_crop_size,
                 full_crop_size=prog_cb.full_crop_size,
@@ -92,7 +93,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             )
         else:
             bsize = cfg.datamodule.batch_size
-            total_steps = math.ceil(len(datamodule.data_train) / bsize) * cfg.trainer.max_epochs
+            total_steps = math.ceil(num_train / bsize) * cfg.trainer.max_epochs
         cfg.module.main_scheduler.T_max = total_steps - cfg.module.warmup_steps
 
     if "codecarbon" in cfg:

@@ -1,0 +1,22 @@
+_target_: src.datamodules.imagenet_datamodule.ImageNetDataModule
+data_path: dataset/hackathon_webdataset
+train_dir: 'train'
+val_dir: 'val'
+test_dir: 'test'
+train_tar: dataset/hackathon_webdataset/imagenet-train-*.tar  # reshuffled shards from scripts/reshard_webdataset.py
+val_tar: dataset/hackathon_webdataset/imagenet-val-*.tar
+wds: True
+wds_buffer_size: 1000
+batch_size: 512
+num_workers: 16
+prefetch_factor: 3
+pin_memory: True
+eval_resize_size: 256
+eval_crop_size: 224
+train_crop_size: 224
+interpolation: 'bilinear'
+hflip_prob: 0.5
+auto_augment_policy: 'ra'
+ra_magnitude: 10
+cutmix_alpha: 0.0
+mixup_alpha: 0.2
