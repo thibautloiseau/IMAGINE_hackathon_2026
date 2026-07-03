@@ -16,19 +16,19 @@ defaults:
   - debug: null
 
 # TODO Write your team name
-team_name: "TODO"
-tags: ["baseline", "evaluate"]
+team_name: "data"
+tags: ['final', 'evaluate']
 
 # seed for random number generators in pytorch, numpy and python.random
 seed: 0
 
 trainer:
-  precision: 32
+  precision: 16-mixed
 
 module:
   compile: false
 
 # TODO Complete with the paths to the checkpoints you want to test
 checkpoints: [
-  "baseline/2026-06-23/16-24-34/checkpoints/last.ckpt",
+  "2_phase_training_earlier_switch/2026-07-03/09-48-27/checkpoints/last.ckpt",
 ]

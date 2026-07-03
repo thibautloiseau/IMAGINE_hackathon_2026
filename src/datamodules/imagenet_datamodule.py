@@ -306,10 +306,16 @@ class ImageNetDataModule(LightningDataModule):
 
         :param stage: The stage to setup. Either `"fit"`, `"validate"`, `"test"`, or `"predict"`. Defaults to ``None``.
         """
-        if stage in ("test", "predict") or stage is None:
-            if not self.data_test:
+        if not self.data_test:
+            test_path = os.path.join(self.hparams.data_path, self.hparams.test_dir)
+            if stage == "predict":
                 self.data_test = UnlabeledImageFolder(
-                    os.path.join(self.hparams.data_path, self.hparams.test_dir),
+                    test_path,
+                    transform=self.eval_transforms,
+                )
+            elif stage == "test":
+                self.data_test = ImageFolder(
+                    test_path,
                     transform=self.eval_transforms,
                 )
         if stage in ("fit", "validate") or stage is None:

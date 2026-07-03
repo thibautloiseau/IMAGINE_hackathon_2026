@@ -8,7 +8,7 @@ resize_size: 124
 crop_size: 112
 jpeg_quality: 75
 overwrite: false # false = reuse existing compressed data; true = reprocess all images
-switch_epoch: 17 # switch to phase 2 at this epoch (0-based)
+switch_epoch: 15 # switch to phase 2 at this epoch (0-based)
 disable_mixup_cutmix: false # disable CutMix and MixUp during compressed-data training
 skip_resize_crop: true # phase 1 only; phase 2 re-enables online resize/crop
 
