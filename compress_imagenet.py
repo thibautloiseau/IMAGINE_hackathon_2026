@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Resize, center-crop, and JPEG-compress an ImageNet-style dataset.
+"""Resize, center-crop, and compress an ImageNet-style dataset.
 
 Applies the same resize + center crop used for validation in
 ``ImageNetDataModule`` (shorter side resized, then center crop), then writes
-JPEG files under ``data/`` with a name derived from the resize/crop sizes and
-JPEG quality, e.g. ``data/train_rs256_cc224_q75/``.
+images under ``data/`` with a name derived from the resize/crop sizes and
+format, e.g. ``data/train_rs256_cc224_q75/`` (JPEG) or
+``data/train_rs256_cc224_png/`` (PNG with ``--no-jpeg``).
 
 With ``--also-jpeg-only``, each source image is read once and two outputs are
-written: the resized/cropped dataset above and a JPEG-only recompression of the
-original resolution at the same quality, e.g. ``data/train_q75/``.
+written: the resized/cropped dataset above and a recompression of the
+original resolution in the same format, e.g. ``data/train_q75/``.
 
 Example:
     uv run compress_imagenet.py --resize-size 256 --crop-size 224 --jpeg-quality 75
     uv run compress_imagenet.py --resize-size 128 --crop-size 96 --jpeg-quality 50 --also-jpeg-only
+    uv run compress_imagenet.py --resize-size 128 --crop-size 96 --no-jpeg
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ class ImageTask:
     interpolation: InterpolationMode
     jpeg_quality: int
     overwrite: bool
+    no_jpeg: bool
 
 
 def resized_dir_name(
@@ -57,9 +60,12 @@ def resized_dir_name(
     crop_size: int,
     jpeg_quality: int,
     output_suffix: str | None = None,
+    no_jpeg: bool = False,
 ) -> str:
     if output_suffix:
         return f"{split}_{output_suffix}"
+    if no_jpeg:
+        return f"{split}_rs{resize_size}_cc{crop_size}_png"
     return f"{split}_rs{resize_size}_cc{crop_size}_q{jpeg_quality}"
 
 
@@ -67,9 +73,13 @@ def jpeg_only_dir_name(
     split: str,
     jpeg_quality: int,
     output_suffix: str | None = None,
+    no_jpeg: bool = False,
 ) -> str:
     if output_suffix:
-        return f"{split}_{output_suffix}_jpeg"
+        suffix = "png" if no_jpeg else "jpeg"
+        return f"{split}_{output_suffix}_{suffix}"
+    if no_jpeg:
+        return f"{split}_png"
     return f"{split}_q{jpeg_quality}"
 
 
@@ -91,14 +101,15 @@ def compressed_datasets_exist(
     jpeg_quality: int,
     splits: tuple[str, ...] = ("train", "val"),
     output_suffix: str | None = None,
+    no_jpeg: bool = False,
 ) -> bool:
     """Return True if all resized+compressed and JPEG-only split dirs exist with images."""
     data_dir = data_dir.resolve()
     for split in splits:
         resized = data_dir / resized_dir_name(
-            split, resize_size, crop_size, jpeg_quality, output_suffix
+            split, resize_size, crop_size, jpeg_quality, output_suffix, no_jpeg=no_jpeg
         )
-        jpeg_only = data_dir / jpeg_only_dir_name(split, jpeg_quality, output_suffix)
+        jpeg_only = data_dir / jpeg_only_dir_name(split, jpeg_quality, output_suffix, no_jpeg=no_jpeg)
         if not _split_has_images(resized) or not _split_has_images(jpeg_only):
             return False
     return True
@@ -113,8 +124,10 @@ def _collect_tasks(
     interpolation: InterpolationMode,
     jpeg_quality: int,
     overwrite: bool,
+    no_jpeg: bool,
 ) -> list[ImageTask]:
     tasks: list[ImageTask] = []
+    ext = ".png" if no_jpeg else ".JPEG"
     for src_path in sorted(src_root.rglob("*")):
         if not src_path.is_file():
             continue
@@ -124,18 +137,19 @@ def _collect_tasks(
         rel_path = src_path.relative_to(src_root)
         jpeg_only_dst = None
         if jpeg_only_root is not None:
-            jpeg_only_dst = jpeg_only_root / rel_path.with_suffix(".JPEG")
+            jpeg_only_dst = jpeg_only_root / rel_path.with_suffix(ext)
 
         tasks.append(
             ImageTask(
                 src=src_path,
-                resized_dst=resized_root / rel_path.with_suffix(".JPEG"),
+                resized_dst=resized_root / rel_path.with_suffix(ext),
                 jpeg_only_dst=jpeg_only_dst,
                 resize_size=resize_size,
                 crop_size=crop_size,
                 interpolation=interpolation,
                 jpeg_quality=jpeg_quality,
                 overwrite=overwrite,
+                no_jpeg=no_jpeg,
             )
         )
     return tasks
@@ -145,9 +159,12 @@ def _needs_processing(dst: Path, overwrite: bool) -> bool:
     return overwrite or not dst.exists()
 
 
-def _save_jpeg(img: Image.Image, dst: Path, jpeg_quality: int) -> None:
+def _save_image(img: Image.Image, dst: Path, jpeg_quality: int, no_jpeg: bool = False) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    img.save(dst, format="JPEG", quality=jpeg_quality, optimize=True)
+    if no_jpeg:
+        img.save(dst, format="PNG", optimize=True)
+    else:
+        img.save(dst, format="JPEG", quality=jpeg_quality, optimize=True)
 
 
 def _process_image(task: ImageTask) -> str:
@@ -163,12 +180,12 @@ def _process_image(task: ImageTask) -> str:
         rgb = img.convert("RGB") if img.mode != "RGB" else img
 
         if need_jpeg_only:
-            _save_jpeg(rgb, task.jpeg_only_dst, task.jpeg_quality)
+            _save_image(rgb, task.jpeg_only_dst, task.jpeg_quality, no_jpeg=task.no_jpeg)
 
         if need_resized:
             resized = F.resize(rgb, task.resize_size, interpolation=task.interpolation)
             cropped = F.center_crop(resized, task.crop_size)
-            _save_jpeg(cropped, task.resized_dst, task.jpeg_quality)
+            _save_image(cropped, task.resized_dst, task.jpeg_quality, no_jpeg=task.no_jpeg)
 
     return "processed"
 
@@ -185,17 +202,18 @@ def _process_split(
     overwrite: bool,
     num_workers: int,
     console: Console,
+    no_jpeg: bool,
 ) -> None:
     src_root = data_dir / split
     if not src_root.is_dir():
         raise FileNotFoundError(f"Split directory not found: {src_root}")
 
     resized_root = data_dir / resized_dir_name(
-        split, resize_size, crop_size, jpeg_quality, output_suffix
+        split, resize_size, crop_size, jpeg_quality, output_suffix, no_jpeg=no_jpeg
     )
     jpeg_only_root = None
     if also_jpeg_only:
-        jpeg_only_root = data_dir / jpeg_only_dir_name(split, jpeg_quality, output_suffix)
+        jpeg_only_root = data_dir / jpeg_only_dir_name(split, jpeg_quality, output_suffix, no_jpeg=no_jpeg)
 
     tasks = _collect_tasks(
         src_root,
@@ -206,6 +224,7 @@ def _process_split(
         interpolation,
         jpeg_quality,
         overwrite,
+        no_jpeg,
     )
     if not tasks:
         console.print(f"[yellow]No images found in {src_root}[/yellow]")
@@ -257,16 +276,17 @@ def compress_splits(
     interpolation: str = "bilinear",
     output_suffix: str | None = None,
     num_workers: int | None = None,
+    no_jpeg: bool = False,
     console: Console | None = None,
 ) -> None:
-    """Resize, crop, and JPEG-compress dataset splits (optionally JPEG-only copies too)."""
+    """Resize, crop, and compress dataset splits (optionally uncompressed copies too)."""
     if resize_size <= 0:
         raise ValueError("resize_size must be positive.")
     if crop_size <= 0:
         raise ValueError("crop_size must be positive.")
     if crop_size > resize_size:
         raise ValueError("crop_size must be <= resize_size.")
-    if not 1 <= jpeg_quality <= 95:
+    if not no_jpeg and not 1 <= jpeg_quality <= 95:
         raise ValueError("jpeg_quality must be between 1 and 95.")
 
     data_dir = data_dir.resolve()
@@ -277,9 +297,11 @@ def compress_splits(
     workers = num_workers or max(1, os.cpu_count() or 1)
     interpolation_mode = _INTERPOLATION[interpolation]
 
+    format_name = "PNG" if no_jpeg else "JPEG"
+    quality_info = f"{format_name}" if no_jpeg else f"{format_name} quality={jpeg_quality}"
     console.print(
         f"Resize={resize_size}, crop={crop_size}, "
-        f"interpolation={interpolation}, JPEG quality={jpeg_quality}, "
+        f"interpolation={interpolation}, {quality_info}, "
         f"also_jpeg_only={also_jpeg_only}, "
         f"workers={workers}, overwrite={overwrite}"
     )
@@ -297,6 +319,7 @@ def compress_splits(
             overwrite=overwrite,
             num_workers=workers,
             console=console,
+            no_jpeg=no_jpeg,
         )
 
 
@@ -337,8 +360,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jpeg-quality",
         type=int,
-        required=True,
-        help="JPEG compression quality from 1 (lowest) to 95 (highest).",
+        default=75,
+        help="JPEG compression quality from 1 (lowest) to 95 (highest). Ignored with --no-jpeg. (default: 75).",
+    )
+    parser.add_argument(
+        "--no-jpeg",
+        action="store_true",
+        help="Save images as lossless PNG instead of JPEG. Disables JPEG compression.",
     )
     parser.add_argument(
         "--also-jpeg-only",
@@ -387,6 +415,7 @@ def main() -> None:
             interpolation=args.interpolation,
             output_suffix=args.output_suffix,
             num_workers=args.num_workers,
+            no_jpeg=args.no_jpeg,
             console=console,
         )
     except (ValueError, FileNotFoundError) as exc:

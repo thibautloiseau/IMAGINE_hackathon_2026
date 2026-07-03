@@ -32,11 +32,12 @@ def apply_compressed_data_config(cfg: DictConfig) -> None:
     resize_size = data_cfg.resize_size
     crop_size = data_cfg.crop_size
     jpeg_quality = data_cfg.jpeg_quality
+    no_jpeg = data_cfg.get("no_jpeg", False)
 
-    phase1_train = resized_dir_name("train", resize_size, crop_size, jpeg_quality)
-    phase1_val = resized_dir_name("val", resize_size, crop_size, jpeg_quality)
-    phase2_train = jpeg_only_dir_name("train", jpeg_quality)
-    phase2_val = jpeg_only_dir_name("val", jpeg_quality)
+    phase1_train = resized_dir_name("train", resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg)
+    phase1_val = resized_dir_name("val", resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg)
+    phase2_train = jpeg_only_dir_name("train", jpeg_quality, no_jpeg=no_jpeg)
+    phase2_val = jpeg_only_dir_name("val", jpeg_quality, no_jpeg=no_jpeg)
 
     with open_dict(cfg.datamodule):
         cfg.datamodule.train_dir = phase1_train
@@ -65,28 +66,31 @@ def prepare_compressed_datasets(cfg: DictConfig) -> None:
     crop_size = data_cfg.crop_size
     jpeg_quality = data_cfg.jpeg_quality
     overwrite = data_cfg.get("overwrite", False)
+    no_jpeg = data_cfg.get("no_jpeg", False)
 
-    resized_train = resized_dir_name("train", resize_size, crop_size, jpeg_quality)
-    resized_val = resized_dir_name("val", resize_size, crop_size, jpeg_quality)
-    jpeg_train = jpeg_only_dir_name("train", jpeg_quality)
-    jpeg_val = jpeg_only_dir_name("val", jpeg_quality)
+    resized_train = resized_dir_name("train", resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg)
+    resized_val = resized_dir_name("val", resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg)
+    jpeg_train = jpeg_only_dir_name("train", jpeg_quality, no_jpeg=no_jpeg)
+    jpeg_val = jpeg_only_dir_name("val", jpeg_quality, no_jpeg=no_jpeg)
 
+    format_name = "PNG" if no_jpeg else "JPEG"
+    quality_str = "PNG" if no_jpeg else f"quality={jpeg_quality}"
     log.info(
         f"Checking compressed datasets (resize={resize_size}, crop={crop_size}, "
-        f"quality={jpeg_quality}, overwrite={overwrite}): "
+        f"{quality_str}, overwrite={overwrite}): "
         f"resized=[{resized_train}, {resized_val}], "
         f"jpeg-only=[{jpeg_train}, {jpeg_val}]"
     )
 
     if not overwrite and compressed_datasets_exist(
-        data_dir, resize_size, crop_size, jpeg_quality
+        data_dir, resize_size, crop_size, jpeg_quality, no_jpeg=no_jpeg
     ):
         log.info(
             f"All compressed datasets already exist under {data_dir} and overwrite=false; "
             "skipping compression."
         )
         print(
-            f"[compressed_data] Skipping compression: resized and JPEG-only datasets "
+            f"[compressed_data] Skipping compression: resized and {format_name}-only datasets "
             f"already exist in {data_dir} (set data.overwrite=true to reprocess)."
         )
         return
@@ -105,6 +109,7 @@ def prepare_compressed_datasets(cfg: DictConfig) -> None:
         jpeg_quality=jpeg_quality,
         also_jpeg_only=True,
         overwrite=overwrite,
+        no_jpeg=no_jpeg,
     )
 
     log.info("Compressed dataset preparation finished.")
