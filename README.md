@@ -44,6 +44,46 @@ wget https://image-net.org/data/ILSVRC/2012/ILSVRC2012_img_train.tar
 If the command doesn't work, download the train split manually from [here](https://image-net.org/challenges/LSVRC/2012/2012-downloads.php#images) - Training images (Task 1 & 2).
 
 Then extract the contents and locate `Data/CLS-LOC/train`. Place it under `data/`, as `data/train`. Then, `cd` into `split_train_set`, check that the paths and options in `split_val_by_spec.py` are correct, and run `python split_val_by_spec.py`.
+=======
+If the download is too slow, or if your machine is not in the lab subnetwork, you can download the dataset from HuggingFace:
+```bash
+curl -LsSf https://hf.co/cli/install.sh | bash
+cd data/
+hf download martalorau/IMAGINE_Hackathon --repo-type dataset
+tar -xf train.tar
+tar -xf val.tar
+cd ../
+```
+
+#### WebDataset (fast dataloading)
+For faster training with large batch sizes, you can use [WebDataset](https://github.com/webdataset/webdataset) — tar-based shards that enable efficient parallel I/O. First, create a single tar from the downloaded `train/` and `val/` directories:
+
+```bash
+tar -cf imagenet.tar train val
+```
+
+Then reshard it into train and val shards:
+
+```bash
+# Train shards (~1.27M samples, 10000 per shard → ~127 shards)
+uv run scripts/reshard_webdataset.py \
+    --src /dataset/IMAGENET-HACKATON-2026/imagenet.tar \
+    --prefix train/ \
+    --out-pattern 'dataset/hackathon_webdataset/imagenet-train-%06d.tar' \
+    --maxcount 10000
+
+# Val shards (~13K samples, 800 per shard → 16 shards, one per worker)
+uv run scripts/reshard_webdataset.py \
+    --src /dataset/IMAGENET-HACKATON-2026/imagenet.tar \
+    --prefix val/ \
+    --out-pattern 'dataset/hackathon_webdataset/imagenet-val-%06d.tar' \
+    --maxcount 800
+```
+
+Then train with the webdataset experiment:
+```bash
+uv run src/train.py experiment=webdataset
+```
 
 ### uv
 We are going to use the [uv package manager](https://docs.astral.sh/uv/). To install it, run:

@@ -104,6 +104,8 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         
         
         # Send to evaluation server
+        experiment_name = rel_ckpt_path.split(os.sep)[0]
+        emissions_path = os.path.join(cfg.paths.codecarbon_dir, *rel_ckpt_dir, "emissions.csv")
         dest_dir = f"172.22.11.44::eval_server/valid/{cfg.team_name}/{experiment_name}/"
         subprocess.call(["rsync", "-avz", "--mkpath", prediction_path, f"{dest_dir}metrics.txt"])
         subprocess.call(["rsync", "-avz", "--mkpath", emissions_path, f"{dest_dir}emissions.csv"])

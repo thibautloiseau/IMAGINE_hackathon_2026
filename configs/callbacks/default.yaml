@@ -8,7 +8,7 @@ model_checkpoint:
   dirpath: ${paths.output_dir}/checkpoints
   filename: "epoch_{epoch:02d}"
   save_last: True
-  every_n_epochs: 25
+  every_n_epochs: 1
   save_on_train_epoch_end: False # runs at end of validation
 
 early_stopping:

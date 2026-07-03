@@ -43,6 +43,7 @@ from src.utils import (
     task_wrapper,
 )
 from src.utils.compressed_data import setup_compressed_data_training
+from src.utils.progressive_resolution import estimate_training_steps
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
@@ -67,6 +68,34 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
 
+    # Pre-instantiate datamodule to compute CosineAnnealingLR T_max
+    # (needs to happen before model/trainer creation)
+    log.info(f"Instantiating datamodule <{cfg.datamodule._target_}>")
+    datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datamodule)
+
+    if "CosineAnnealingLR" in cfg.module["main_scheduler"]["_target_"]:
+        datamodule.setup(stage="fit")  # Load training set
+        num_train = datamodule._wds_train_count if datamodule.wds else len(datamodule.data_train)
+        callbacks_cfg = cfg.get("callbacks") or {}
+        prog_cb = callbacks_cfg.get("progressive_resolution")
+        if prog_cb and prog_cb.get("match_tokens"):
+            total_steps = estimate_training_steps(
+                num_train_samples=num_train,
+                max_epochs=cfg.trainer.max_epochs,
+                start_crop_size=cfg.datamodule.train_crop_size,
+                full_crop_size=prog_cb.full_crop_size,
+                mode=prog_cb.mode,
+                step_size=prog_cb.get("step_size", 16),
+                epochs_per_stage=prog_cb.get("epochs_per_stage", 1),
+                switch_epoch=prog_cb.get("switch_epoch"),
+                reference_crop_size=prog_cb.full_crop_size,
+                reference_batch_size=prog_cb.reference_batch_size,
+            )
+        else:
+            bsize = cfg.datamodule.batch_size
+            total_steps = math.ceil(num_train / bsize) * cfg.trainer.max_epochs
+        cfg.module.main_scheduler.T_max = total_steps - cfg.module.warmup_steps
+
     if "codecarbon" in cfg:
         log.info("Instantiating CodeCarbon tracker...")
         tracker: EmissionsTracker = instantiate_emissions_tracker(cfg)
@@ -81,14 +110,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
         log.info(f"Instantiating datamodule <{cfg.datamodule._target_}>")
         datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datamodule)
-
-        if "CosineAnnealingLR" in cfg.module["main_scheduler"]["_target_"]:
-            datamodule.setup(stage="fit")  # Load training set
-            bsize = cfg.datamodule.batch_size
-            steps_per_epoch = math.ceil(len(datamodule.data_train) / bsize)
-            cfg.module.main_scheduler.T_max = (
-                cfg.trainer.max_epochs * steps_per_epoch - cfg.module.warmup_steps
-            )
 
         log.info(f"Instantiating module <{cfg.module._target_}>")
         model: LightningModule = hydra.utils.instantiate(cfg.module)
