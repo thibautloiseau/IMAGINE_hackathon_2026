@@ -28,7 +28,5 @@ trainer:
 module:
   compile: false
 
-# TODO Complete with the paths to the checkpoints you want to test
 checkpoints: [
-  "2_phase_training_earlier_switch/2026-07-03/09-48-27/checkpoints/last.ckpt",
 ]
